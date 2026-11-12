@@ -11,7 +11,8 @@
 //   --trace        print the state at every instruction boundary, one line each, in the same
 //                  format as rustx86's trace16 so the two can be diffed
 //   --wait TEXT    script step: run until TEXT is on the text screen
-//   --type TEXT    script step: type TEXT at the keyboard (\n is Enter)
+//   --type TEXT    script step: type TEXT at the keyboard (\n is Enter; \kNN presses the key
+//                  with scancode NN in hex, so \k3F is F5)
 //   --screen       print the text screen when the run ends
 //   --ports        report the I/O ports the guest used that nothing answered
 //   --headless     never open the interactive console
@@ -96,17 +97,26 @@ fn script_poll() -> bool {
             screen_text(scr, false);
             if find(scr, text) < 0 { return false; }
         } else {
-            // Feed the keyboard a few characters at a time so its queue never overflows.
-            while type_index < text.len && kbd_queued() < 200 {
+            // One character per poll, and only once the guest has taken the last one: both from
+            // the keyboard controller and, for guests that read keys through the BIOS, from the
+            // BIOS queue, which holds 15 keys and drops the rest.
+            let taken = kbd_queued() == 0 && !kbd_full && !bios_key_available();
+            if type_index < text.len && taken {
                 var c = text[type_index];
                 if c == '\\' && type_index + 1 < text.len && text[type_index + 1] == 'n' {
                     c = '\n';
                     type_index++;
                 }
-                type_char(c);
-                type_index++;
+                if c == '\\' && type_index + 3 < text.len && text[type_index + 1] == 'k' {
+                    let scan, ok = parse_int(text[type_index + 2..type_index + 4], 16);
+                    if ok { key(scan as! u8); }
+                    type_index += 4;
+                } else {
+                    type_char(c);
+                    type_index++;
+                }
             }
-            if type_index < text.len || kbd_queued() > 0 || kbd_full { return false; }
+            if type_index < text.len || kbd_queued() > 0 || kbd_full || bios_key_available() { return false; }
             type_index = 0;
         }
         step_pos++;

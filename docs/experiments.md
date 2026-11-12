@@ -343,3 +343,77 @@ not clear and set up the terminal unless the view differed from the default, so 
 
 Whether Ctrl-] itself failed to reach g86m in that terminal, or was simply not known, is not
 established.
+
+## E006: Boot FreeDOS to a prompt (M3, 2026-11-12)
+
+- **Hypothesis**: With the BIOS keyboard path completed (the INT 09h handler tracking Shift, Ctrl
+  and Alt and filling the BIOS queue; INT 16h waiting idle for a key), FreeDOS 1.4
+  (`fd14boot.img`, the image rustx86 boots) reaches its boot menu, starts FreeCOM, and runs `ver`
+  and `dir` at the `A:\>` prompt. Unlike ELKS, FreeDOS does its screen, keyboard and disk work
+  through the BIOS, so this exercises the paths E004 listed as untested.
+- **What changed since last time**: The BIOS keyboard handler only handled unshifted keys and INT 16h
+  spun in a loop while waiting. The script gains `\kNN` to press a key by scancode (F5 is `\k3F`).
+- **Next move for each result**:
+  - Reaches `A:\>` and `ver` prints a FreeDOS version → fix the script as a regression test, open
+    a PR
+  - Stops on an unimplemented BIOS call, port or opcode → implement it and run again
+  - Stops on a 386 instruction → find out why FreeDOS thinks this is a 386 (the CPU detection
+    reads the top bits of FLAGS and tries PUSH SP), fix the detection result, not the instruction
+  - Hangs with no stop → compare the trace with rustx86's from the start of the disk boot
+- **Cut-off**: The same day. The FreeDOS installer (which rustx86 reaches through 32-bit
+  instructions) is out of scope: it needs M4.
+
+### Result
+
+2026-11-12. **FreeDOS reaches `A:\>` and runs commands. Next move: open a PR.**
+
+The session presses F5 when the kernel banner appears, answers `\FREEDOS\BIN\COMMAND.COM` when
+the kernel asks for the shell, and runs three commands. The screen at the end:
+
+```
+ Enter the full shell command line: \FREEDOS\BIN\COMMAND.COM
+FreeCom version 0.86 - WATCOMC - XMS_Swap [Dec 30 2024 22:10:51]
+A:\>ver /r
+FreeCom version 0.86 - WATCOMC - XMS_Swap [Dec 30 2024 22:10:51]
+DOS version 7.10
+FreeDOS kernel 2043 (build 2043 OEM:0xfd) [compiled May 13 2021]
+A:\>dir /w
+ Volume in drive A is FD14-BOOT
+ Volume Serial Number is BB79-CEB9
+ Directory of A:\
+KERNEL.SYS     FDAUTO.BAT     FDCONFIG.SYS   [FREEDOS]      SETUP.BAT
+         4 file(s)         87,913 bytes
+         1 dir(s)         807,936 bytes free
+A:\>echo Done-%COMSPEC%
+Done-A:\FREEDOS\BIN\COMMAND.COM
+```
+
+- It passes on the debug and release builds as a script, and through the console on a
+  pseudo-terminal, where F5 is sent as the escape sequence a terminal sends for it. Both are in
+  `tools/difftest.sh`, which now has 21 checks
+- The M1 traces, the ELKS script and the ELKS console sessions still pass
+- bench.bin: 3526–3795 ms, about 100–105 MIPS. Not distinguishable from before on three runs
+
+As with ELKS, the kernel came up on the first run: the boot menu appeared without the machine
+stopping on anything unimplemented. Two things did have to be fixed, both about keys arriving
+faster than the guest takes them:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The shell path stopped at `\FREEDOS\BIN\CO` in the script | The script queued every key at once. FreeDOS reads keys through the BIOS, whose queue holds 15 | The script types one key per poll, and only once the guest has taken the last one |
+| The same in the console when the path arrived in one write, as a paste does | The console passed everything it read straight on | The console keeps what it read and hands it over one key at a time |
+
+The console change makes typing slightly slower to arrive: `sleep 3` measured from the moment the
+line is written now takes 3.25 s instead of 3.04 s, because its 21 characters go in at one per
+hundredth of a second.
+
+What happens without F5, for the record:
+
+- Enter at the language menu starts FreeCOM, which runs `FDAUTO.BAT`. That stops g86m at
+  `unimplemented opcode 66 at 22c8:0759`: a 386 operand-size prefix. rustx86 gets past this point
+  through its 32-bit instructions. Whether that program checks the CPU first was not looked into;
+  the card's "why does FreeDOS think this is a 386" question is still open, and belongs with M4
+- The menu screen shows `Singlestepping (F8) is:` with nothing after it. Not looked into
+
+Not tested: any DOS program other than the shell's built-in commands. `dir`, `ver` and `echo` are
+all inside FreeCOM.

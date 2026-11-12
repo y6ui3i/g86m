@@ -80,14 +80,35 @@ if [ -f images/fd2880.img ]; then
             echo "FAIL  elks shell ($(basename "$exe")): $(tail -1 build/elks.err)"
         fi
     done
-    # The interactive console, driven through a pseudo-terminal.
-    if command -v python3 >/dev/null; then
-        python3 -I tools/console_test.py build/g86m images/fd2880.img 2>/dev/null || fail=1
-    else
-        echo "skip  console (python3 is not there)"
-    fi
 else
     echo "skip  elks shell (images/fd2880.img is not there)"
-    echo "skip  console (images/fd2880.img is not there)"
+fi
+
+# FreeDOS: F5 skips CONFIG.SYS, the kernel asks where the shell is, then commands run at A:\>.
+if [ -f images/fd14boot.img ]; then
+    for exe in build/g86m-debug build/g86m; do
+        out=$("$exe" --headless --max 900000000 \
+            --wait "FreeDOS kernel" --type '\k3F' \
+            --wait "full shell command line" --type '\FREEDOS\BIN\COMMAND.COM\n' \
+            --wait 'A:\>' --type 'ver /r\n' --wait "DOS version" \
+            --type 'dir /w\n' --wait "bytes free" \
+            --type 'echo Done-%COMSPEC%\n' --wait 'Done-A:\FREEDOS\BIN\COMMAND.COM' \
+            images/fd14boot.img 2>"build/freedos.err")
+        if [ $? -eq 0 ] && echo "$out" | grep -q "FreeDOS kernel 2043"; then
+            echo "ok    freedos prompt ($(basename "$exe"))"
+        else
+            fail=1
+            echo "FAIL  freedos prompt ($(basename "$exe")): $(tail -1 build/freedos.err)"
+        fi
+    done
+else
+    echo "skip  freedos prompt (images/fd14boot.img is not there)"
+fi
+
+# The interactive console, driven through a pseudo-terminal. It takes the images that are there.
+if command -v python3 >/dev/null; then
+    python3 -I tools/console_test.py build/g86m images 2>/dev/null || fail=1
+else
+    echo "skip  console (python3 is not there)"
 fi
 exit $fail

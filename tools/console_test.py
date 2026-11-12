@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Drives the interactive console through a pseudo-terminal, the way a person at a terminal would.
 
-    tools/console_test.py build/g86m images/fd2880.img
+    tools/console_test.py build/g86m images
 
-Logs in to ELKS, runs a command, checks that `sleep 3` takes about 3 seconds of real time, leaves
-with Ctrl-], and checks that the terminal modes are put back. Exits 0 when all of that holds.
+With images/fd2880.img: logs in to ELKS, runs a command, checks that `sleep 3` takes about 3
+seconds of real time, leaves with Ctrl-], and checks that the terminal modes are put back; then
+repeats a shorter session on two terminals smaller than 80x25.
+
+With images/fd14boot.img: boots FreeDOS, presses F5 as a real function key, answers where the
+shell is, and runs `dir`.
+
+An image that is not there is reported as skipped. Exits 0 when nothing failed.
 
 The console only sends the cells that changed, so its output cannot be read as a stream of text.
 The test keeps its own 80x25 grid and applies the cursor moves and characters to it.
@@ -123,7 +129,8 @@ def session(exe, image, rows, cols, full, quit_key=b"\x1d"):
     os.write(master, b"root\r")
     wait("the shell prompt", screen.at_prompt, 30)
     os.write(master, b"uname -a\r")
-    wait("uname output", contains("ibmpc i8086"), 30)
+    # The start of the line: on a terminal narrower than the line, its end is cut off.
+    wait("uname output", contains("ELKS elks 0.9.1"), 30)
     wait("the prompt after uname", screen.at_prompt, 30)
 
     # Scroll the guest's screen well past the height of the terminal, then check a command still
@@ -200,16 +207,102 @@ def timing_and_keys(master, screen, wait, has_line, pump, fail):
     return slept, interrupted
 
 
+def start(exe, image, rows, cols):
+    """Starts g86m on a new pseudo-terminal. Returns (pid, master, slave, modes before)."""
+    master, slave = pty.openpty()
+    termios.tcsetwinsize(slave, (rows, cols))
+    before = termios.tcgetattr(slave)
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        os.dup2(slave, 0)
+        os.dup2(slave, 1)
+        os.close(master)
+        os.execv(exe, [exe, image])
+    return pid, master, slave, before
+
+
+def dos_session(exe, image):
+    """FreeDOS through the console: F5 as the escape sequence a terminal sends, then `dir`."""
+    rows, cols = 30, 100
+    pid, master, slave, before = start(exe, image, rows, cols)
+    screen = Screen(rows, cols)
+
+    def fail(message):
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        print("FAIL  console freedos:", message)
+        for line in screen.lines():
+            if line:
+                print("    |" + line)
+        sys.exit(1)
+
+    def wait(what, text, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(text in line for line in screen.lines()):
+                return
+            ready, _, _ = select.select([master], [], [], 0.02)
+            if ready:
+                try:
+                    screen.feed(os.read(master, 65536))
+                except OSError:
+                    break
+        fail(f"timed out after {timeout}s waiting for {what}")
+
+    wait("the kernel banner", "FreeDOS kernel", 60)
+    os.write(master, b"\x1b[15~")                       # F5
+    wait("the question about the shell", "full shell command line", 60)
+    os.write(master, b"\\FREEDOS\\BIN\\COMMAND.COM\r")
+    wait("the prompt", "A:\\>", 60)
+    os.write(master, b"dir /w\r")
+    wait("the directory listing", "bytes free", 60)
+    if screen.out_of_bounds:
+        fail(f"the console addressed row {screen.out_of_bounds[0]}, column {screen.out_of_bounds[1]}")
+    os.write(master, b"\x1b[24~")                       # F12
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        # Keep reading: g86m waits for its last output to be taken before it restores the terminal.
+        ready, _, _ = select.select([master], [], [], 0.02)
+        if ready:
+            try:
+                os.read(master, 65536)
+            except OSError:
+                pass
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+    else:
+        fail("did not exit within 10s of F12")
+    if os.waitstatus_to_exitcode(status) != 0:
+        fail(f"exit status {os.waitstatus_to_exitcode(status)}")
+    if termios.tcgetattr(slave) != before:
+        fail("terminal modes were not restored")
+    os.close(master)
+    os.close(slave)
+
+
 def main():
-    exe, image = sys.argv[1], sys.argv[2]
-    boot, slept, interrupted = session(exe, image, 30, 100, True)
-    print(f"ok    console 100x30 (boot to login {boot:.1f}s, sleep 3 took {slept:.2f}s, "
-          f"Ctrl-C ended sleep 30 after {interrupted:.2f}s)")
-    # Terminals smaller than the guest's 80x25 screen: shorter, and both shorter and narrower.
-    # Each leaves by a different key: Ctrl-\ and F12.
-    for rows, cols, quit_key, name in ((10, 80, b"\x1c", "Ctrl-\\"), (12, 60, b"\x1b[24~", "F12")):
-        session(exe, image, rows, cols, False, quit_key)
-        print(f"ok    console {cols}x{rows} (the view follows the cursor; {name} quits)")
+    exe, images = sys.argv[1], sys.argv[2]
+    elks = os.path.join(images, "fd2880.img")
+    freedos = os.path.join(images, "fd14boot.img")
+    if os.path.exists(elks):
+        boot, slept, interrupted = session(exe, elks, 30, 100, True)
+        print(f"ok    console elks 100x30 (boot to login {boot:.1f}s, sleep 3 took {slept:.2f}s, "
+              f"Ctrl-C ended sleep 30 after {interrupted:.2f}s)")
+        # Terminals smaller than the guest's 80x25 screen, each left by a different key.
+        for rows, cols, quit_key, name in ((10, 80, b"\x1c", "Ctrl-\\"), (12, 60, b"\x1b[24~", "F12")):
+            session(exe, elks, rows, cols, False, quit_key)
+            print(f"ok    console elks {cols}x{rows} (the view follows the cursor; {name} quits)")
+    else:
+        print("skip  console elks (fd2880.img is not there)")
+    if os.path.exists(freedos):
+        dos_session(exe, freedos)
+        print("ok    console freedos 100x30 (F5 as a function key, shell path, dir)")
+    else:
+        print("skip  console freedos (fd14boot.img is not there)")
 
 
 main()
