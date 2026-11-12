@@ -324,3 +324,22 @@ shifted right and hid the `# ` prompt. That is why the sideways rule differs fro
 
 Still not checked on a real terminal: colours, the cursor, line-drawing characters, arrow and
 function keys, and resizing the window while it runs.
+
+### Follow-up: no way out (2026-11-12)
+
+The second try by hand ended with "I don't know how to get out". The quit key, Ctrl-], was
+mentioned in the README and nowhere on the screen.
+
+- The way out is now shown in three places: a line printed before the console opens (held for 1.2 s
+  when the terminal has no spare row, and left in the scrollback), the window title, and a dim line
+  below the screen when the terminal has more than 25 rows
+- Two more keys leave the console: F12 and Ctrl-\. Ctrl-] is awkward on some keyboard layouts
+- The test checks the line before the console opens, the line below the screen at 100x30, and
+  leaves by a different key in each of its three sessions
+
+Adding the line below the screen turned up a bug in the previous follow-up: the first redraw did
+not clear and set up the terminal unless the view differed from the default, so on a terminal of
+25 rows or more nothing was cleared at the start. The first redraw now always does.
+
+Whether Ctrl-] itself failed to reach g86m in that terminal, or was simply not known, is not
+established.

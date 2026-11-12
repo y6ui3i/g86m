@@ -17,7 +17,7 @@ static int raw_on = 0;
 static void restore(void) {
     if (!raw_on) return;
     raw_on = 0;
-    static const char leave[] = "\x1b[0m\x1b[?25h\x1b[?1049l";
+    static const char leave[] = "\x1b[0m\x1b[?25h\x1b[?1049l\x1b[23;0t";
     ssize_t r = write(STDOUT_FILENO, leave, sizeof leave - 1);
     (void)r;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved);
@@ -43,7 +43,8 @@ int32_t con_open(void) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGHUP, on_signal);
-    static const char enter[] = "\x1b[?1049h\x1b[2J\x1b[H";
+    // Save the window title and put the way out in it, where it costs no screen rows.
+    static const char enter[] = "\x1b[22;0t\x1b]0;g86m - Ctrl-] or F12 to quit\x07\x1b[?1049h\x1b[2J\x1b[H";
     ssize_t r = write(STDOUT_FILENO, enter, sizeof enter - 1);
     (void)r;
     return 1;

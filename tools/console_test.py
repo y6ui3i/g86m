@@ -64,7 +64,7 @@ class Screen:
         return self.col == 2 and "".join(self.cells[self.row][:2]) == "# "
 
 
-def session(exe, image, rows, cols, full):
+def session(exe, image, rows, cols, full, quit_key=b"\x1d"):
     """One console session on a terminal of rows by cols. full runs every check; otherwise only
     the ones that show the screen fits the terminal."""
     master, slave = pty.openpty()
@@ -78,7 +78,7 @@ def session(exe, image, rows, cols, full):
         os.close(master)
         os.execv(exe, [exe, image])
 
-    screen = Screen(min(rows, 25), min(cols, 80))
+    screen = Screen(rows, cols)
     raw = b""
 
     def pump(seconds):
@@ -144,7 +144,11 @@ def session(exe, image, rows, cols, full):
     # output and does not go through the grid's rules.
     if screen.out_of_bounds:
         fail(f"the console addressed row {screen.out_of_bounds[0]}, column {screen.out_of_bounds[1]}")
-    os.write(master, b"\x1d")
+    if rows > 25 and not contains("to quit")():
+        fail("no hint on how to quit below the screen")
+    if b"to quit" not in raw.split(b"\x1b[?1049h")[0]:
+        fail("no hint on how to quit before the console opened")
+    os.write(master, quit_key)
     deadline = time.monotonic() + 10
     status = None
     while time.monotonic() < deadline:
@@ -153,7 +157,7 @@ def session(exe, image, rows, cols, full):
         if done:
             break
     else:
-        fail("did not exit within 10s of Ctrl-]")
+        fail(f"did not exit within 10s of the quit key {quit_key!r}")
     if os.waitstatus_to_exitcode(status) != 0:
         fail(f"exit status {os.waitstatus_to_exitcode(status)}")
     if b"\x1b[?1049l" not in raw:
@@ -202,9 +206,10 @@ def main():
     print(f"ok    console 100x30 (boot to login {boot:.1f}s, sleep 3 took {slept:.2f}s, "
           f"Ctrl-C ended sleep 30 after {interrupted:.2f}s)")
     # Terminals smaller than the guest's 80x25 screen: shorter, and both shorter and narrower.
-    for rows, cols in ((10, 80), (12, 60)):
-        session(exe, image, rows, cols, False)
-        print(f"ok    console {cols}x{rows} (the view follows the cursor)")
+    # Each leaves by a different key: Ctrl-\ and F12.
+    for rows, cols, quit_key, name in ((10, 80, b"\x1c", "Ctrl-\\"), (12, 60, b"\x1b[24~", "F12")):
+        session(exe, image, rows, cols, False, quit_key)
+        print(f"ok    console {cols}x{rows} (the view follows the cursor; {name} quits)")
 
 
 main()

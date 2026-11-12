@@ -65,8 +65,9 @@ fn type_ctrl(c: u8) {
 
 var key_buf: u8[>..<];
 
-// The key a CSI or SS3 escape sequence stands for: its final byte and numeric parameter.
-fn escape_key(last: u8, param: i64) {
+// Queues the key a CSI or SS3 escape sequence stands for: its final byte and numeric parameter.
+// True when the key is F12, which leaves the console instead of going to the guest.
+fn escape_key(last: u8, param: i64) -> bool {
     match last {
         'A' => { key_extended(0x48); },
         'B' => { key_extended(0x50); },
@@ -88,15 +89,17 @@ fn escape_key(last: u8, param: i64) {
                 6 => { key_extended(0x51); },
                 11..16 => { key((0x3B + param - 11) as! u8); },
                 17..22 => { key((0x40 + param - 17) as! u8); },
+                24 => { return true; },
                 _ => {},
             }
         },
         _ => {},
     }
+    return false;
 }
 
 // Reads what the host keyboard has sent and queues it for the guest.
-// False when the user pressed Ctrl-] to leave.
+// False when the user asked to leave: Ctrl-], Ctrl-\ or F12.
 fn console_keys() -> bool {
     key_buf.clear();
     loop {
@@ -108,7 +111,7 @@ fn console_keys() -> bool {
     while i < key_buf.len {
         let c = key_buf[i];
         i++;
-        if c == 0x1D { return false; }
+        if c == 0x1D || c == 0x1C { return false; }
         if c == 0x1B && i < key_buf.len && (key_buf[i] == '[' || key_buf[i] == 'O') {
             i++;
             var param = 0;
@@ -116,7 +119,10 @@ fn console_keys() -> bool {
                 if key_buf[i] <= '9' { param = param * 10 + (key_buf[i] - '0'); }
                 i++;
             }
-            if i < key_buf.len { escape_key(key_buf[i], param); i++; }
+            if i < key_buf.len {
+                if escape_key(key_buf[i], param) { return false; }
+                i++;
+            }
         }
         else if c < 0x20 && c != 0x1B && c != '\r' && c != '\n' && c != '\t' && c != 0x08 { type_ctrl(c); }
         else { type_char(c); }
@@ -149,6 +155,7 @@ var view_rows = 25;
 var view_cols = 80;
 var view_top = 0;
 var view_left = 0;
+var view_drawn = false;       // false until the first redraw, which has to clear and set up the terminal
 
 fn put_char(c: u8) {
     if c >= 0x20 && c < 0x7F { out.push(c); return; }
@@ -206,7 +213,8 @@ fn console_render() {
     // Sideways the view goes back to column 0 as soon as the cursor fits, so that a prompt at the
     // start of a line is not left hidden after a long line pushed the view right.
     let left = view_start(0, cols, cursor % 80, 80);
-    if rows != view_rows || cols != view_cols || top != view_top || left != view_left {
+    if !view_drawn || rows != view_rows || cols != view_cols || top != view_top || left != view_left {
+        view_drawn = true;
         view_rows = rows;
         view_cols = cols;
         view_top = top;
@@ -217,6 +225,15 @@ fn console_render() {
         format(out, "[0m");
         out.push(ESC);
         format(out, "[2J");
+        // With a row to spare below the screen, say how to leave. (The window title says it too.)
+        if term_rows > 25 {
+            out.push(ESC);
+            format(out, "[26;1H");
+            out.push(ESC);
+            format(out, "[2mg86m: Ctrl-] or F12 to quit");
+            out.push(ESC);
+            format(out, "[0m");
+        }
     }
 
     var pen = -1;            // the screen cell the terminal's cursor is on after the last character

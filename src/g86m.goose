@@ -5,7 +5,7 @@
 // A 512-byte image is a boot sector; anything else is a floppy image booted as drive A.
 // A floppy image started from a terminal, with no script and no trace, opens the interactive
 // console: the guest's text screen is drawn in the terminal and the keyboard goes to the guest.
-// Ctrl-] leaves it.
+// Ctrl-] or F12 leaves it.
 //
 //   --max N        stop after N instructions of virtual time
 //   --trace        print the state at every instruction boundary, one line each, in the same
@@ -238,7 +238,14 @@ fn main() {
     }
 
     scripted = step_kind.len > 0;
-    let interactive = !trace && !scripted && !headless && img.len != 512 && con_is_tty() != 0 && con_open() != 0;
+    var interactive = !trace && !scripted && !headless && img.len != 512 && con_is_tty() != 0;
+    if interactive {
+        // Said on the ordinary screen first, so it is also there to scroll back to afterwards.
+        write_stdout("g86m: Ctrl-] or F12 to quit\r\n");
+        flush_stdout();
+        if con_rows() <= 25 { con_sleep_us(1200000); }     // no room for the hint line: let it be read
+        interactive = con_open() != 0;
+    }
     let t0 = clock_ns();
     if trace { trace_line(); }
     let result = if interactive { run_console(max) } else { run_until(max) };
