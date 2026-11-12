@@ -111,3 +111,8 @@ To regenerate them, run `ORACLE=/path/to/trace16 tools/difftest.sh`.
 
 The boot sectors in `testdata/` are copied from rustx86's `asm/` as they are, including the Japanese
 comments in their sources. `probe/` holds the M0 probes.
+
+## License
+
+[MIT](LICENSE). The disk images g86m boots are not part of this repository and have licenses of
+their own.
