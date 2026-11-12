@@ -238,3 +238,64 @@ Ports ELKS used that nothing answers (from `--ports`): 70h/71h (CMOS), 80h (POST
 controller), 110h, 510h/511h.
 
 Not done in M2: an interactive front end. The only way to use the shell so far is the script.
+
+## E005: An interactive terminal console (2026-11-12)
+
+- **Hypothesis**: A console that draws the 80x25 text screen in the host terminal with ANSI escapes,
+  feeds host keystrokes to the keyboard controller as scancodes, and paces the virtual clock against
+  real time, is enough to use the ELKS shell by hand: what is typed appears, commands run, and
+  `sleep 3` takes about 3 seconds.
+- **What changed since last time**: E004 drove the machine with a script and skipped idle time. This
+  adds C glue for raw terminal mode (`src/console.c`), a renderer that sends only the cells that
+  changed, key translation (printable keys, Enter, Backspace, Ctrl combinations, arrows and the
+  editing keys), and pacing: the machine runs one hundredth of a second of virtual time, then sleeps
+  until real time catches up. The virtual CPU speed stays at 4 instructions per timer tick, about
+  4.77 million instructions per second.
+- **Next move for each result**:
+  - A pseudo-terminal test logs in, runs a command, sees `sleep 3` take 2.5–3.5 s, and quits with
+    the terminal restored → open a PR and hand it over to be tried by hand
+  - Text is garbled or keys are lost → dump the bytes the console writes and reads in the test and
+    fix the renderer or the key translation
+  - `sleep 3` is far from 3 s → the pacing or the timer model is wrong; measure virtual against
+    real time over the same interval before changing the ratio
+  - The terminal is left in raw mode after quitting or a crash → fix the restore path before
+    anything else, since that breaks the user's shell
+- **Cut-off**: The same day. FreeDOS is out of scope here: it needs M3.
+
+### Result
+
+2026-11-12. **The console works through a pseudo-terminal. Next move: open a PR and hand it over to
+be tried by hand.**
+
+`tools/console_test.py` starts g86m on a pseudo-terminal, keeps its own 80x25 grid from the escape
+sequences g86m writes, and types as a person would:
+
+| Check | Result |
+|---|---|
+| Boots to `login:` | 0.7 s of real time, the same figure ELKS prints as `[0.69 secs]` |
+| Logs in as root, runs `uname -a` | `ibmpc i8086` on the screen, then the prompt |
+| `sleep 3; echo slept` | 3.04 s of real time (accepted range 2.5–3.5 s) |
+| Backspace | Seven Backspaces erase `wrongXX`, and the line that runs prints `backsp` |
+| Ctrl-C | `sleep 30` is still running after 1 s; Ctrl-C brings the prompt back in 0.02 s |
+| Ctrl-] | g86m exits with status 0, leaves the alternate screen, and the terminal modes are back to what they were |
+
+It is part of `tools/difftest.sh` when the image and python3 are there. The M1 trace tests and the
+ELKS script still pass on both builds. bench.bin is unchanged at about 105 MIPS.
+
+Two things went wrong on the way, both in the test and not in the console:
+
+- The first version stripped escape sequences and searched the remaining text. The console sends
+  only the cells that changed, so blanks that were already on the screen are never sent, and `# `
+  could not match. The test now applies cursor moves to a grid of its own
+- The first Ctrl-C check passed in 0.00 s: it looked at the grid before reading any new output and
+  saw the old prompt. It now waits until `sleep 30` has been running for a second before sending
+  Ctrl-C
+
+Not checked, because a pseudo-terminal test cannot see it:
+
+- How it looks: colours, the cursor, the code page 437 line-drawing characters. ELKS at a shell
+  prompt uses none of the last
+- A host terminal smaller than 80x25. Nothing handles it; lines will wrap
+- Arrow keys, function keys and the editing keys. The translation is written but no test presses them
+- How it feels to type. The guest runs at about 4.77 million instructions per second, a made-up
+  figure that follows from 4 instructions per timer tick

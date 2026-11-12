@@ -80,7 +80,14 @@ if [ -f images/fd2880.img ]; then
             echo "FAIL  elks shell ($(basename "$exe")): $(tail -1 build/elks.err)"
         fi
     done
+    # The interactive console, driven through a pseudo-terminal.
+    if command -v python3 >/dev/null; then
+        python3 -I tools/console_test.py build/g86m images/fd2880.img 2>/dev/null || fail=1
+    else
+        echo "skip  console (python3 is not there)"
+    fi
 else
     echo "skip  elks shell (images/fd2880.img is not there)"
+    echo "skip  console (images/fd2880.img is not there)"
 fi
 exit $fail
