@@ -1,13 +1,13 @@
 #!/bin/sh
-# 命令テストを走らせ、命令境界ごとのトレースを期待値と比べる。
+# Runs the instruction tests and compares the per-instruction traces with the expected ones.
 #
-#   tools/difftest.sh                 期待値 (tests/expected/*.trace.gz) と比べる
+#   tools/difftest.sh                 compare with tests/expected/*.trace.gz
 #   ORACLE=/path/to/trace16 tools/difftest.sh
-#                                     rustx86 の trace16 で期待値を作り直してから比べる
+#                                     regenerate the expected traces with rustx86's trace16 first
 #
-# trace16 は tools/oracle/trace16.rs を rustx86 の core/examples/ に置いて
+# To build trace16, put tools/oracle/trace16.rs in rustx86's core/examples/ and run
 #   cargo build --release -p rustx86-core --example trace16
-# で作る。GOOSE でコンパイラの場所を変えられる。
+# GOOSE names the compiler when it is not on PATH.
 set -u
 cd "$(dirname "$0")/.."
 GOOSE="${GOOSE:-goose}"
@@ -31,7 +31,7 @@ for bin in build/t_*.bin build/hello.bin build/interrupt.bin build/vram.bin; do
     fi
     build/g86m-debug --trace --max 2000000 "$bin" > "build/$name.trace" 2> "build/$name.err"
     gunzip -c "$exp" > "build/$name.expected"
-    # release ビルドも同じトレースを出すこと (最適化で挙動が変わらないことの確認)。
+    # The release build must produce the same trace: optimization must not change behaviour.
     if ! build/g86m --trace --max 2000000 "$bin" 2>/dev/null | cmp -s - "build/$name.expected"; then
         fail=1
         echo "FAIL  $name: release build differs from the expected trace"
@@ -50,7 +50,7 @@ for bin in build/t_*.bin build/hello.bin build/interrupt.bin build/vram.bin; do
     fi
 done
 
-# 自己判定テスト: 正解器と比べられないもの。コンソールに OK とだけ出れば合格。
+# Self-checking tests, for what the oracle cannot judge. A test passes when the console says OK and nothing else.
 for bin in build/s_*.bin; do
     name=$(basename "$bin" .bin)
     for exe in build/g86m-debug build/g86m; do

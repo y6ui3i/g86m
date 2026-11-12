@@ -1,19 +1,19 @@
-// 命令の実行。16bit リアルモード、挙動は 386 に合わせる (PUSH SP は元の値、
-// シフト回数は 5bit、除算例外は命令の先頭を指す)。
+// Instruction execution. 16-bit real mode with 386 behaviour: PUSH SP pushes the old
+// value, shift counts use 5 bits, and a divide error points at the start of the instruction.
 
 import state;
 import alu;
 import bios;
 
-// ---- 1 命令の間だけ生きるデコード状態 ----
+// ---- Decode state that lives for one instruction ----
 
-var seg_ovr = -1;            // セグメント上書き: -1 なし、0..3 は ES CS SS DS
-var rep: u8 = 0;             // 0 なし、1 REPNE (F2)、2 REP/REPE (F3)
-var insn_ip: u16 = 0;        // 命令の先頭 (プレフィックス込み)。例外の戻り先
+var seg_ovr = -1;            // segment override: -1 none, 0..3 are ES CS SS DS
+var rep: u8 = 0;             // 0 none, 1 REPNE (F2), 2 REP/REPE (F3)
+var insn_ip: u16 = 0;        // start of the instruction, prefixes included; where a fault returns to
 var m_mod: u8 = 0;
 var m_reg: u8 = 0;
 var m_rm: u8 = 0;
-var ea_seg: u16 = 0;         // 実効アドレスのセグメント値
+var ea_seg: u16 = 0;         // segment value of the effective address
 var ea_off: u16 = 0;
 
 fn fetch8() -> u8 {
@@ -35,7 +35,7 @@ fn fetchw(w: u8) -> u32 {
     return fetch16();
 }
 
-// 既定のセグメント def を、上書きプレフィックスがあれば差し替える。
+// The default segment def, replaced by an override prefix when there is one.
 fn seg_val(def: i64) -> u16 {
     if seg_ovr >= 0 { return cpu.segs[seg_ovr]; }
     return cpu.segs[def];
@@ -95,7 +95,7 @@ fn jump_rel8(taken: bool) {
     if taken { cpu.ip += d; }
 }
 
-// 除算例外 (#DE)。戻り先は命令の先頭。
+// Divide error (#DE). It returns to the start of the instruction.
 fn divide_error() {
     cpu.ip = insn_ip;
     interrupt(0);
@@ -108,7 +108,7 @@ fn far_call(seg: u16, off: u16) {
     cpu.ip = off;
 }
 
-// ---- 文字列命令 (A4..A7, AA..AF) ----
+// ---- String instructions (A4..A7, AA..AF) ----
 
 fn string_op(op: u8) {
     let w = width(op);
@@ -153,7 +153,7 @@ fn string_op(op: u8) {
     }
 }
 
-// ---- グループ命令 ----
+// ---- Group instructions ----
 
 // F6 / F7: TEST NOT NEG MUL IMUL DIV IDIV
 fn group3(op: u8) {
@@ -172,7 +172,8 @@ fn group3(op: u8) {
                 set_flag(CF, p > 0xFF);
                 set_flag(OF, p > 0xFF);
             } else {
-                // 狭い型を返す呼び出しを広い型と直接掛けない (docs/goose-notes.md の 1)。
+                // Never multiply a call that returns a narrower type by a wider value directly
+                // (docs/goose-notes.md, item 1).
                 let a: u32 = r16(AX);
                 let p = a * v;
                 set_r16(AX, p as! u16);
@@ -263,7 +264,7 @@ fn group45(op: u8) {
     }
 }
 
-// ---- BCD 補正 ----
+// ---- BCD adjustment ----
 
 fn daa_das(sub: bool) {
     let old = r8(0);
@@ -298,10 +299,10 @@ fn aaa_aas(sub: bool) {
     set_r8(0, r8(0) & 0x0F);
 }
 
-// ---- 1 命令 ----
+// ---- One instruction ----
 
 fn step() {
-    // BIOS の入口に来ていたら、命令を読まずにサービスを代行して IRET する。
+    // At a BIOS entry: perform the service instead of fetching an instruction, then IRET.
     if cpu.segs[CS] == BIOS_SEG && cpu.ip < 256 {
         bios_call(cpu.ip as! u8);
         iret();
@@ -326,7 +327,7 @@ fn step() {
         op = fetch8();
     }
 
-    // 00..3F のうち下位 3bit が 0..5 のものは、8 種の演算 × 6 つの形。
+    // In 00..3F, opcodes whose low 3 bits are 0..5 are the 8 operations in 6 forms.
     if op < 0x40 && op & 7 < 6 {
         let aop = op >> 3;
         let w = width(op);
@@ -504,7 +505,7 @@ fn step() {
         },
         0xD6 => { set_r8(0, if flag(CF) { 0xFF } else { 0 }); },
         0xD7 => { let idx: u16 = r8(0); set_r8(0, rd8(seg_val(DS), r16(BX) + idx)); },
-        0xD8..0xE0 => { decode_modrm(); },      // FPU なし: オペランドだけ読み飛ばす
+        0xD8..0xE0 => { decode_modrm(); },      // no FPU: skip the operand
 
         0xE0 => { set_r16(CX, r16(CX) - 1); jump_rel8(r16(CX) != 0 && !flag(ZF)); },
         0xE1 => { set_r16(CX, r16(CX) - 1); jump_rel8(r16(CX) != 0 && flag(ZF)); },

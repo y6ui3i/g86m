@@ -1,9 +1,10 @@
-// g86m: Goose で書く x86 エミュレータ。
+// g86m: an x86 emulator written in Goose.
 //
 //   g86m [--trace] [--max N] boot.bin
 //
-// ブートセクタを 0000:7C00 に置いて HLT まで走らせる。--trace は命令境界ごとの
-// 状態を標準出力に 1 行ずつ出す (rustx86 側の trace16 と同じ書式で、diff 用)。
+// Loads a boot sector at 0000:7C00 and runs it until HLT. --trace prints the state at
+// every instruction boundary, one line each, in the same format as rustx86's trace16
+// so the two can be diffed.
 
 import std;
 import os;
@@ -37,7 +38,7 @@ fn trace_line() {
     if trace_buf.len > 60000 { write_stdout(trace_buf); trace_buf.clear(); }
 }
 
-// 電源投入時の下ごしらえ: IVT の全ベクタを BIOS の入口に向ける。
+// Power-on setup: point every IVT vector at the BIOS entry for that interrupt.
 fn power_on() {
     for n: u16 in 0..256 {
         wr16(0, n * 4, n);
@@ -74,7 +75,7 @@ fn main() {
     power_on();
     for b, k in img { ram[0x7C00 + k] = b; }
     cpu.ip = 0x7C00;
-    set_r16(DX, 0x0080);                 // DL = ブートドライブ番号
+    set_r16(DX, 0x0080);                 // DL = boot drive number
 
     let t0 = clock_ns();
     var n = 0;

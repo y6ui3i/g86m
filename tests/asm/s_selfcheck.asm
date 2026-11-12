@@ -1,6 +1,6 @@
-; rustx86 と比べられない命令の自己判定。全部通れば "OK" を出す。
-;   - IDIV で -32768 / -1: 商が収まらないので除算例外 (rustx86 はここで panic する)
-;   - SALC (D6): AL = CF ? FFh : 00h (rustx86 は AL を変えない)
+; Self-check for instructions that cannot be compared with rustx86. Prints "OK" when all pass.
+;   - IDIV of -32768 by -1: the quotient does not fit, so it is a divide error (rustx86 panics here)
+;   - SALC (D6): AL = CF ? FFh : 00h (rustx86 leaves AL unchanged)
 %include "common.inc"
 start:
     HDR

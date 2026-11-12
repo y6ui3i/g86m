@@ -1,4 +1,4 @@
-; 8 種の演算 + TEST を、レジスタ・メモリ・即値の各形で。値の組は表から読む。
+; The 8 operations plus TEST, in register, memory and immediate forms. Operand pairs come from a table.
 %include "common.inc"
 %macro OPS 2
     add  %1, %2

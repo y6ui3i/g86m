@@ -1,4 +1,4 @@
-; グループ 1 (80/81/83) のメモリ即値形と、INC/DEC/NEG/NOT の残り。
+; Group 1 (80/81/83) with a memory operand and an immediate, and the rest of INC/DEC/NEG/NOT.
 %include "common.inc"
 %macro OPS 2
     add  %1, %2

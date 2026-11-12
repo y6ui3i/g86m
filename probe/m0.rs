@@ -1,4 +1,4 @@
-// E002: probe/m0.goose と同じ断片を Rust で書いたもの。速度比較用。
+// E002: the same fragment as probe/m0.goose, written in Rust for a speed comparison.
 //
 //   rustc --edition 2021 -C opt-level=3 -o build/m0_rs probe/m0.rs && ./build/m0_rs testdata/bench.bin
 

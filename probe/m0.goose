@@ -1,5 +1,5 @@
-// M0: Goose でエミュレータの核が書けるかの試し書き (docs/experiments.md E001)。
-// rustx86 の asm/hello.bin と asm/bench.bin が使う命令だけを実装した 8086 の断片。
+// M0: a probe of whether the core of an emulator can be written in Goose (docs/experiments.md, E001).
+// A fragment of an 8086 with only the instructions rustx86's asm/hello.bin and asm/bench.bin use.
 //
 //   goose build -o m0 probe/m0.goose && ./m0 testdata/hello.bin
 
@@ -142,7 +142,7 @@ fn unimpl(op: u8) {
     cpu.fault = true;
 }
 
-// レジスタ同士の ModR/M だけを受ける。メモリオペランドは M1 で入れる。
+// Accepts register-to-register ModR/M only. Memory operands arrive in M1.
 fn modrm_rr(op: u8) -> u8 {
     let m = fetch8();
     if m < 0xC0 { unimpl(op); }

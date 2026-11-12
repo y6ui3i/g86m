@@ -1,126 +1,166 @@
-# 実験台帳
+# Experiment ledger
 
-回す前にカードを書き、結果を同じ場所に追記する。
+A card is written before an experiment runs, and its result is added in the same place.
 
-## E001: Goose でエミュレータの核が書けるか (M0, 2026-11-12)
+## E001: Can the core of an emulator be written in Goose? (M0, 2026-11-12)
 
-- **仮説**: Goose v2026.4 で、x86 インタプリタの核になる 4 つの形が素直に書ける。
-  (a) CPU 状態の struct と 1MB のゲスト RAM をグローバルに置く
-  (b) オペコードの `match` ディスパッチが実用速度で回る
-  (c) CPU 状態を `to_bytes` / `from_bytes` で往復できる (スナップショットの種)
-  (d) `extern fn` で自前の C を呼べる (端末 raw モードなどの接着用)
-- **前回から変えた条件**: 初回。入力は rustx86 の `asm/hello.bin` と `asm/bench.bin` (命令数が固定の 10 命令ループ)。
-- **結果ごとの次の一手**:
-  - hello が `Hello, World!` を出し、bench が HLT で止まり 100 MIPS 以上 → この書き方のまま M1 (8086 全命令) へ
-  - 動くが 30 MIPS 未満 → 生成された C を読み、境界検査 (`--bce-lines`) と RAM の置き方を変えて測り直す
-  - (a)(b) が言語規則で書けない → RAM を C 側に持つ構成に切り替えて再評価。それも無理なら Goose での移植をやめる判断材料として報告
-  - (c)(d) だけ書けない → M1 は進め、スナップショットと接着は C 側で持つ方針を ADR に残す
-- **打ち切り**: 当日中。コンパイラのバグらしきものを踏んだら、最小再現を残して回避策で先へ進む。
+- **Hypothesis**: With Goose v2026.4, the four shapes at the core of an x86 interpreter can be written
+  without fighting the language.
+  (a) A struct for the CPU state and 1 MB of guest RAM, both as globals
+  (b) Opcode dispatch with `match`, at a usable speed
+  (c) A round trip of the CPU state through `to_bytes` / `from_bytes` (the seed of snapshots)
+  (d) Calling our own C through `extern fn` (glue for things like terminal raw mode)
+- **What changed since last time**: First run. The inputs are rustx86's `asm/hello.bin` and
+  `asm/bench.bin` (a 10-instruction loop with a fixed instruction count).
+- **Next move for each result**:
+  - hello prints `Hello, World!`, bench stops at HLT and runs at 100 MIPS or more → go on to M1
+    (the full 8086 instruction set) written the same way
+  - It works but below 30 MIPS → read the generated C, then change the bounds checks (`--bce-lines`)
+    and where RAM lives, and measure again
+  - (a) or (b) cannot be written under the language rules → move RAM to the C side and reassess.
+    If that fails too, report it as grounds for dropping Goose
+  - Only (c) or (d) cannot be written → carry on with M1, and record in an ADR that snapshots and
+    glue live on the C side
+- **Cut-off**: The same day. On anything that looks like a compiler bug, keep a minimal reproduction
+  and move on with a workaround.
 
-### 結果
+### Result
 
-2026-11-12、Goose v2026.4 (macos-arm64 リリース版)、clang 21.0.0、Apple Silicon。4 つとも合格。**次の一手: この書き方のまま M1 へ。**
+2026-11-12, Goose v2026.4 (macos-arm64 release), clang 21.0.0, Apple Silicon. All four passed.
+**Next move: on to M1, written the same way.**
 
-| 項目 | 結果 |
+| Item | Result |
 |---|---|
-| (a) struct + 1MB RAM | `var ram: u8[RAM_SIZE]` と `var cpu: Cpu` をグローバルに置けた (`probe/m0.goose`) |
-| (b) `match` ディスパッチ | hello.bin は `Hello, World!` を出して 84 命令で HLT。bench.bin は 369,095,178 命令で HLT、3 回の実測 1857〜1890 ms = **約 197 MIPS** |
-| (b) 正しさ | bench 終了時の AX=57136 BX=13090 DX=4148 と命令数が、別に書いた Python モデルと一致 |
-| (c) スナップショット | `Cpu[>..]` (30 バイト) と RAM 1MB を `to_bytes` → `from_bytes` で往復し一致。先頭 1 バイトを壊すと `false` と空配列が返る (`probe/m0_snap.goose`) |
-| (d) C 連携 | `m0_cext.build` の `c_sources` で自前の C をリンクし、スカラとスライス (`{data, len}`) を渡せた (`probe/m0_cext.goose`) |
+| (a) struct + 1 MB RAM | `var ram: u8[RAM_SIZE]` and `var cpu: Cpu` work as globals (`probe/m0.goose`) |
+| (b) `match` dispatch | hello.bin prints `Hello, World!` and halts after 84 instructions. bench.bin halts after 369,095,178 instructions; three runs took 1857–1890 ms = **about 197 MIPS** |
+| (b) correctness | At the end of bench, AX=57136 BX=13090 DX=4148 and the instruction count match a separately written Python model |
+| (c) snapshot | `Cpu[>..]` (30 bytes) and 1 MB of RAM make the round trip through `to_bytes` → `from_bytes` and compare equal. Corrupting the first byte returns `false` and an empty array (`probe/m0_snap.goose`) |
+| (d) C interop | `c_sources` in `m0_cext.build` links our own C; a scalar and a slice (`{data, len}`) cross the boundary (`probe/m0_cext.goose`) |
 
-分かったこと:
+What was learned:
 
-- `--debug` ビルドは bench が 21,248 ms (約 17 MIPS)。符号付きオーバーフローと範囲検査が入るので、テストは debug、測定は release で分ける
-- 直列化は配列単位。struct 単体は `T[>..]` に 1 要素入れて渡す
-- `args` / `write_stderr` は `import os;` が要る (`std` だけでは見えない)
-- 整数の `match` は半開区間 (`0x40..0x48`) が書けるので、レジスタ埋め込み型のオペコードはそのまま並べられる
-- 型検査で直したのは import 1 行だけ。言語規則で詰まった箇所はなかった
+- A `--debug` build takes 21,248 ms on bench (about 17 MIPS). It adds signed-overflow and range
+  checks, so tests use debug and measurements use release
+- Serialization works on arrays. A single struct goes in a one-element `T[>..]`
+- `args` and `write_stderr` need `import os;` (`std` alone does not provide them)
+- An integer `match` takes half-open ranges (`0x40..0x48`), so opcodes with an embedded register
+  number can be listed as they are
+- The only thing typechecking made me fix was one import line. Nothing got stuck on the language rules
 
-測っていないこと: メモリオペランドの ModR/M、割り込み、デバイス。197 MIPS は 10 命令ループの数字で、OS を走らせたときの値ではない。
+Not measured: ModR/M with memory operands, interrupts, devices. The 197 MIPS figure is for a
+10-instruction loop, not for running an operating system.
 
-## E002: 同じ断片を Rust で書いたときとの速度差 (2026-11-12)
+## E002: Speed against the same fragment written in Rust (2026-11-12)
 
-- **仮説**: `probe/m0.goose` と同じ形の Rust (`probe/m0.rs`、同じ命令・同じフラグ計算・同じ 1MB RAM) は、bench.bin で Goose 版と ±20% 以内に収まる。
-- **前回から変えた条件**: E001 の Goose 版はそのまま。比較対象を 2 つ足す。(1) 同じ断片の Rust 版、(2) rustx86 本体の `core/examples/bench.rs` (デコードキャッシュ・装置・割り込み込みの完成品なので参考値)。
-- **結果ごとの次の一手**:
-  - ±20% 以内 → 言語による速度の心配はせず M1 へ。速度の作業は命令が揃ってからにする
-  - Goose が 20% 超遅い → M1 の前に `--bce-lines` で残っている境界検査を見て、RAM アクセスの書き方を決める
-  - Goose が 20% 超速い → 理由 (生成 C とアセンブリ) を 1 回だけ確認して記録し、M1 へ
-- **打ち切り**: 当日中。各 5 回測って中央値で比べる。
+- **Hypothesis**: Rust code of the same shape as `probe/m0.goose` (`probe/m0.rs`: the same
+  instructions, the same flag computation, the same 1 MB of RAM) is within ±20% of the Goose version
+  on bench.bin.
+- **What changed since last time**: The Goose version from E001 is unchanged. Two things are added
+  to compare against: (1) the same fragment in Rust, and (2) rustx86's own `core/examples/bench.rs`,
+  as a reference only, since it is the finished product with a decode cache, devices and interrupts.
+- **Next move for each result**:
+  - Within ±20% → stop worrying about the language's speed and go on to M1. Work on speed waits
+    until the instruction set is complete
+  - Goose is more than 20% slower → before M1, look at the remaining bounds checks with
+    `--bce-lines` and decide how RAM access is written
+  - Goose is more than 20% faster → check why once (the generated C and assembly), record it, and
+    go on to M1
+- **Cut-off**: The same day. Five runs each, compared by the median.
 
-### 結果
+### Result
 
-2026-11-12、Apple Silicon、bench.bin (369,095,178 命令)、各 5 回の中央値。**仮説は外れた。Goose 版は同じ形の Rust 版より約 35% 時間がかかる。**
+2026-11-12, Apple Silicon, bench.bin (369,095,178 instructions), median of five runs each.
+**The hypothesis was wrong. The Goose version takes about 35% longer than Rust code of the same shape.**
 
-| 実装 | 中央値 | MIPS | 備考 |
+| Implementation | Median | MIPS | Notes |
 |---|---:|---:|---|
-| Rust 断片 (`probe/m0.rs`, rustc 1.97.1 `-C opt-level=3`) | 1386 ms | 約 266 | |
-| Goose 断片 (`probe/m0.goose`, v2026.4 → clang 21 `-O2`) | 1873 ms | 約 197 | Rust 版の 1.35 倍の時間 |
-| rustx86 本体 (`core/examples/bench.rs`, release) | 7.07 秒 | 約 52 | 完成品。装置・割り込み・32bit 対応込みなので参考値 |
+| Rust fragment (`probe/m0.rs`, rustc 1.97.1 `-C opt-level=3`) | 1386 ms | about 266 | |
+| Goose fragment (`probe/m0.goose`, v2026.4 → clang 21 `-O2`) | 1873 ms | about 197 | 1.35 times the Rust time |
+| rustx86 itself (`core/examples/bench.rs`, release) | 7.07 s | about 52 | The finished product, with devices, interrupts and 32-bit support; a reference only |
 
-3 者とも命令数は 369,095,178 で一致。断片 2 つは終了時の AX / BX / DX も一致。
+All three execute 369,095,178 instructions. The two fragments also agree on AX / BX / DX at the end.
 
-差の原因を 1 回だけ調べた結果:
+The cause was looked into once:
 
-- **境界検査ではない。** `--bce-lines` で 60 個中 59 個が除去済み。残る 1 個は `get8` の AH 側 (`regs[i - 4]`) で、bench の内側ループは通らない
-- **グローバルの間接参照でもない。** 生成 C の `GS_GL` は静的領域のアドレスで、ポインタの読み直しはない
-- **C の最適化レベルでもほぼない。** 生成 C を `-O3` で組み直して 1765 ms (約 5% 改善)
-- 残る候補は未検証: RAM への `u8` 書き込みが CPU 状態と別名になりうるため、clang が flags やレジスタを書き込みのたびに読み直している可能性。Rust は `Box` の一意性でこれを避けられる
+- **Not bounds checks.** `--bce-lines` shows 59 of 60 removed. The one that remains is on the AH side
+  of `get8` (`regs[i - 4]`), which bench's inner loop never reaches
+- **Not indirection through globals.** `GS_GL` in the generated C is the address of static storage;
+  no pointer is reloaded
+- **Hardly the C optimization level.** Recompiling the generated C at `-O3` gives 1765 ms (about 5% better)
+- One candidate remains and is untested: a `u8` write to RAM may alias the CPU state, so clang may
+  reload flags and registers after every write. Rust avoids this through the uniqueness of `Box`
 
-次の一手 (カードの「20% 超遅い」枝を、調べた結果で更新):
+Next move (the "more than 20% slower" branch of the card, updated with what was found):
 
-- 境界検査が原因ではないので、RAM アクセスの書き方は変えない。**M1 はこのまま進める**
-- 速度は命令が揃ってから、遅延フラグ (結果とオペランドだけ保存し、読むときに計算) を入れる段で測り直す。set_flag の読み書きが減るので、別名の読み直しが原因なら同時に効く
-- 断片どうしでも Goose は rustx86 本体の約 3.8 倍速い。ただし本体は機能が違うので、これは Goose が Rust より速いことを意味しない
+- Bounds checks are not the cause, so the way RAM access is written stays. **M1 goes ahead as planned**
+- Speed is measured again once the instruction set is complete, at the point lazy flags go in
+  (keep only the result and the operands, compute a flag when it is read). That cuts the reads and
+  writes in set_flag, so it should help at the same time if aliasing reloads are the cause
+- Even as a fragment, Goose is about 3.8 times faster than rustx86 itself. rustx86 does much more,
+  so this does not mean Goose is faster than Rust
 
-## E003: 8086 命令一式を rustx86 とのトレース差分で検証する (M1, 2026-11-12)
+## E003: Verify the 8086 instruction set by diffing traces against rustx86 (M1, 2026-11-12)
 
-- **仮説**: `src/` の 16bit リアルモード実装は、命令群ごとのテスト用ブートセクタ 8 本 (`tests/asm/t_*.asm`) と rustx86 のブートセクタ 4 本で、rustx86 と命令境界ごとの状態 (CS:IP、汎用 8 本、ES/SS/DS、FLAGS) が全行一致する。
-- **前回から変えた条件**: E001 の断片 (25 命令) を、8086 + 186 の命令一式に広げた。正解器は rustx86 に足した `trace16` (`tools/oracle/trace16.rs`)。rustx86 は test386.asm で 386 実機の期待値とビット一致しているので、未定義フラグも含めて rustx86 に合わせる。
-- **結果ごとの次の一手**:
-  - 全行一致 → 期待トレースを `tests/expected/` に固定して PR、M2 (ELKS) へ
-  - 不一致 → 最初にずれた行の命令を特定して直す。未定義フラグの差なら rustx86 の実装を読んで合わせる
-  - rustx86 側が 8086 の仕様と違う動きをしている疑いが出たら、合わせずに記録して相談
-- **打ち切り**: 当日中。テストに無い命令 (IN/OUT の実デバイス、割り込みコントローラ) は M2 に回す。
+- **Hypothesis**: The 16-bit real-mode implementation in `src/` matches rustx86 on every line of the
+  state at each instruction boundary (CS:IP, the eight general registers, ES/SS/DS, FLAGS), for eight
+  test boot sectors, one per instruction group (`tests/asm/t_*.asm`), and four rustx86 boot sectors.
+- **What changed since last time**: The fragment from E001 (25 instructions) grew into the 8086 + 186
+  instruction set. The oracle is `trace16`, added to rustx86 (`tools/oracle/trace16.rs`). rustx86
+  matches expected values from a real 386 bit for bit on test386.asm, so g86m follows rustx86 on
+  undefined flags too.
+- **Next move for each result**:
+  - Every line matches → fix the expected traces in `tests/expected/`, open a PR, go on to M2 (ELKS)
+  - A mismatch → find the instruction at the first line that differs and fix it. If it is an
+    undefined flag, read rustx86's implementation and follow it
+  - If rustx86 looks like it departs from the 8086 specification → do not follow it; record it and ask
+- **Cut-off**: The same day. Instructions with no test (IN/OUT on real devices, the interrupt
+  controller) move to M2.
 
-### 結果
+### Result
 
-2026-11-12。**全行一致した。次の一手: 期待トレースを固定して PR、M2 へ。**
+2026-11-12. **Every line matched. Next move: fix the expected traces, open a PR, go on to M2.**
 
-| テスト | 行数 | 内容 |
+| Test | Lines | Contents |
 |---|---:|---|
-| t_alu / t_alu2 | 945 / 400 | 8 種の演算と TEST、INC / DEC / NEG / NOT を全オペランド形で |
-| t_shift | 2924 | 回転とシフト 7 種 × 回数 14 通り × 8bit / 16bit |
-| t_muldiv | 650 | MUL / IMUL / DIV / IDIV、除算例外、CBW / CWD / AAM / AAD |
-| t_bcd | 4533 | DAA / DAS / AAA / AAS × AL 52 通り × CF・AF 4 通り |
-| t_string | 96 | MOVS / CMPS / SCAS / STOS / LODS、REP 各種、DF 両向き、セグメント上書き |
-| t_flow | 538 | 条件分岐 16 種 × フラグ 14 通り、LOOP 系、CALL / RET / 遠隔、INT / INTO / IRET |
-| t_misc | 147 | ModR/M 24 通り、セグメント既定と上書き、スタック、PUSHA / ENTER、XCHG / XLAT、フラグ操作 |
-| hello / interrupt / vram | 98 / 37 / 44 | rustx86 のブートセクタ |
-| s_selfcheck | - | 正解器と比べられない 2 件 (IDIV の最小値、SALC) の自己判定 |
+| t_alu / t_alu2 | 945 / 400 | The 8 operations and TEST, INC / DEC / NEG / NOT, in every operand form |
+| t_shift | 2924 | 7 rotates and shifts × 14 counts × 8 and 16 bits |
+| t_muldiv | 650 | MUL / IMUL / DIV / IDIV, divide errors, CBW / CWD / AAM / AAD |
+| t_bcd | 4533 | DAA / DAS / AAA / AAS × 52 values of AL × 4 combinations of CF and AF |
+| t_string | 96 | MOVS / CMPS / SCAS / STOS / LODS, each REP form, both directions of DF, segment overrides |
+| t_flow | 538 | 16 conditions × 14 flag words, the LOOP family, CALL / RET / far forms, INT / INTO / IRET |
+| t_misc | 147 | 24 ModR/M forms, default and overridden segments, the stack, PUSHA / ENTER, XCHG / XLAT, flag instructions |
+| hello / interrupt / vram | 98 / 37 / 44 | rustx86's boot sectors |
+| s_selfcheck | - | Self-check for the two cases the oracle cannot judge (IDIV of the minimum value, SALC) |
 
-debug ビルドと release ビルドの両方で同じ結果。`tools/difftest.sh` で再現できる (期待値は `tests/expected/` に固定したので rustx86 は不要)。
+Of the four rustx86 boot sectors the hypothesis named, three were compared. The fourth, `mode13.bin`,
+needs devices and is listed under "Left out of M1" below.
 
-初回実行では 11 本中 7 本が一致。残り 4 本の原因:
+Debug and release builds give the same result. `tools/difftest.sh` reproduces it; the expected traces
+are fixed in `tests/expected/`, so rustx86 is not needed.
 
-| ずれ | 原因 | 直した側 |
+On the first run, 7 of the 11 matched. The causes of the other 4:
+
+| Mismatch | Cause | Fixed in |
 |---|---|---|
-| 右回転・シフトの OF | 実 386 は回数 1 以外では OF を触らない (左回転だけ全回数で更新)。毎回更新していた | g86m |
-| PUSHF の上位 4bit | rustx86 の既定は 8086 プロファイルで、上位 4bit を 1 で積む。0 で積んでいた | g86m |
-| `MUL` 16bit の上位語が 0 | Goose コンパイラのバグ ([goose-notes.md](goose-notes.md) の 1) | g86m (回避) |
-| IDIV の余りの符号 | Goose の `%` が床寄せ ([goose-notes.md](goose-notes.md) の 2) | g86m |
+| OF after right rotates and shifts | A real 386 leaves OF alone unless the count is 1 (only left rotates update it at every count). g86m updated it every time | g86m |
+| The top 4 bits pushed by PUSHF | rustx86 defaults to its 8086 profile, which pushes them as ones. g86m pushed zeros | g86m |
+| The high word of 16-bit `MUL` was 0 | A Goose compiler bug ([goose-notes.md](goose-notes.md), item 1) | g86m (workaround) |
+| The sign of the IDIV remainder | Goose's `%` floors ([goose-notes.md](goose-notes.md), item 2) | g86m |
 
-テスト側のバグも 3 件あった (386 の near Jcc を NASM が出していた、DF を立てたまま表を読んで逆走、RET n の呼び出し側で引数を積み忘れ)。
-うち逆走は無限ループになり、打ち切りのないトレースが 60GB まで伸びた。すぐ消し、`difftest.sh` は 200 万命令で打ち切るようにした。
+The tests had three bugs of their own: NASM emitted the 386 near Jcc; a table was read with DF set,
+so the read ran backwards; and a caller of RET n did not push the arguments. The backwards read was
+an endless loop, and a trace with no cut-off grew to 60 GB. It was deleted at once, and `difftest.sh`
+now stops at 2 million instructions.
 
-rustx86 側で見つけたこと (合わせなかったもの) は [goose-notes.md](goose-notes.md) の末尾。
+What turned up in rustx86 and was not followed is at the end of [goose-notes.md](goose-notes.md).
 
-速度: bench.bin は release で 3394〜3487 ms = **約 108 MIPS**。E001 の断片 (197 MIPS) より遅いのは、プレフィックスの読み取りと ModR/M の一般形が入ったため。rustx86 本体 (約 52 MIPS) の約 2 倍。
+Speed: bench.bin takes 3394–3487 ms on the release build = **about 108 MIPS**. It is slower than the
+E001 fragment (197 MIPS) because prefix handling and the general form of ModR/M are now in. It is
+about twice rustx86 itself (about 52 MIPS).
 
-M1 に入れなかったもの:
+Left out of M1:
 
-- `mode13.bin`: INT 10h のモード設定と VGA の DAC ポートが要る。デバイスは M2 以降
-- IN / OUT の実デバイス、PIC / PIT、ハードウェア割り込み
-- 66h / 67h プレフィックスと 0Fh で始まる命令 (386 以降)。当たったら止まる
-- VRAM の中身の確認。vram.bin はレジスタのトレースだけ一致を見ている
+- `mode13.bin`: it needs the INT 10h mode set and the VGA DAC ports. Devices start in M2
+- IN / OUT on real devices, the PIC and PIT, hardware interrupts
+- The 66h / 67h prefixes and instructions that start with 0Fh (386 and later). g86m stops on them
+- Checking what is in VRAM. For vram.bin only the register trace is compared

@@ -1,8 +1,8 @@
-; 全テスト共通の出だし。割り込みは禁止のまま (タイマ割り込みが入るとトレースがずれる)。
+; Shared opening for every test. Interrupts stay disabled: a timer interrupt would shift the trace.
 org 0x7C00
 bits 16
 cpu 186
-; 表を回すループの戻りは 127 バイトを超えるので、条件を裏返して near JMP で戻る。
+; The backward branch of a table loop is over 127 bytes, so invert the condition and go back with a near JMP.
 %macro LOOP_BELOW 1
     jnb  %%done
     jmp  %1

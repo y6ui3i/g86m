@@ -1,4 +1,4 @@
-// M0 (c): CPU 状態と RAM を to_bytes / from_bytes で往復できるか。
+// M0 (c): can the CPU state and RAM make a round trip through to_bytes / from_bytes?
 import std;
 
 struct Cpu { regs: u16[8], segs: u16[4], ip: u16, flags: u16, halted: bool }

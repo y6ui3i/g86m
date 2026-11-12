@@ -1,6 +1,6 @@
-; 乗除算。除算例外は INT 0 のハンドラが命令長 (全部 2 バイト) だけ進めて戻る。
-; AX=8000h を -1 で割る IDIV は入れていない: rustx86 がそこで panic するので
-; 期待値が作れない (docs/goose-notes.md の「rustx86 側で見つけたこと」)。
+; Multiply and divide. On a divide error the INT 0 handler skips the instruction (all are 2 bytes) and returns.
+; IDIV of AX=8000h by -1 is left out: rustx86 panics there, so no expected trace
+; can be made (docs/goose-notes.md, "Found in rustx86").
 %include "common.inc"
 start:
     HDR

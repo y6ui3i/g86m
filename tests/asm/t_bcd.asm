@@ -1,4 +1,4 @@
-; DAA / DAS / AAA / AAS を、AL の値と CF・AF の 4 通りの組で。
+; DAA / DAS / AAA / AAS over a range of AL values and the four combinations of CF and AF.
 %include "common.inc"
 start:
     HDR

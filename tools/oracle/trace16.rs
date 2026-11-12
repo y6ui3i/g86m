@@ -1,4 +1,5 @@
-//! g86m の正解器: ブートセクタを 1 命令ずつ進め、命令境界ごとの状態を 1 行で吐く。
+//! Oracle for g86m: steps a boot sector one instruction at a time and prints the state
+//! at every instruction boundary, one line each.
 use rustx86_core::Machine;
 use std::io::Write;
 
