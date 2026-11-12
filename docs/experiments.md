@@ -417,3 +417,71 @@ What happens without F5, for the record:
 
 Not tested: any DOS program other than the shell's built-in commands. `dir`, `ver` and `echo` are
 all inside FreeCOM.
+
+## E007: FreeDOS without F5 (2026-11-12)
+
+First try by hand: "FreeDOS goes down at once". Without F5 the normal startup stops g86m, and in
+the console the reason is printed while the alternate screen is up, so it is never seen.
+
+The stop is at `66 53 66 9C 66 9C 66 58 66 0D ...`: PUSH EBX, PUSHFD, PUSHFD, POP EAX, OR EAX — the
+usual test for CPUID. A program only runs that after deciding the CPU is at least a 386.
+
+- **Hypothesis**: g86m answers the two standard CPU tests inconsistently. FLAGS bits 12–15 read as
+  ones, which is an 8086; but PUSH SP pushes the value from before the decrement, which is a 286 or
+  later. A program that tests PUSH SP first and then finds bits 12–14 stuck at one concludes "386".
+  If PUSH SP pushes the decremented value, as a real 8086 does, the program takes its 8086 path and
+  FreeDOS's normal startup gets past this point.
+- **What changed since last time**: E006 always pressed F5. This runs the normal startup, with PUSH
+  SP changed to the 8086 behaviour. M1 followed rustx86 here (rustx86 has the same mix but
+  survives because it implements the 386 instructions).
+- **Next move for each result**:
+  - The startup gets past the stop and reaches a prompt or the installer's first question → keep
+    the 8086 PUSH SP until M4 makes the machine a real 386, move the PUSH SP case from the trace
+    test to the self-check, and test the normal startup
+  - It still stops on a 386 instruction → the program does not test the CPU, or tests it another
+    way. Read the code before the stop to see which, and record it; the real fix is then M4
+  - It stops on something else → fix that if it is small, record it if not
+- **Whatever the result**: the console must show why the machine stopped after it closes.
+- **Cut-off**: The same day.
+
+### Result
+
+2026-11-12. **The hypothesis held. FreeDOS's normal startup now reaches `A:\>` without F5.**
+
+With PUSH SP pushing the decremented value, the program that stopped g86m takes its 8086 path:
+
+```
+Welcome to the FreeDOS 1.4 installation program.
+...
+Do you want to proceed [Y,N]?N
+The installation of FreeDOS 1.4 has been aborted.
+A:\>dir /w
+ Volume in drive A is FD14-BOOT
+ Volume Serial Number is BB79-CEB9
+ Directory of A:\
+[FREEDOS]      FDAUTO.BAT     FDCONFIG.SYS   KERNEL.SYS     SETUP.BAT
+         4 file(s)         87,913 bytes
+         1 dir(s)         807,936 bytes free
+```
+
+- The session is: Enter at the language menu, `n` and Enter at the installer's question, then
+  `dir /w`. It is in `tools/difftest.sh` on both builds, next to the F5 session; 23 checks, all pass
+- This is the first DOS program other than the shell to run: the installer front end draws its
+  banner and prompt through INT 10h AH=02h/08h/09h (about 3,500, 1,000 and 1,100 calls)
+- PUSH SP left the trace test (`t_misc`), because g86m no longer agrees with rustx86 there, and went
+  into the self-check, which now expects the 8086 result. The other ten expected traces were
+  regenerated from the oracle and came out byte for byte the same
+- The console now repeats the reason the machine stopped after it closes. Nothing tests that
+
+One wrong turn on the way: after `n` the installer seemed to hang. It was waiting for Enter. Finding
+that out took a memory dump of the text screen (`--dump`, new), which showed the screen was drawn
+correctly and the cursor sat right after the `N`. The stop message now also includes the bytes at
+the stopping address, and `--ports` reports how often each BIOS service was called.
+
+What this does not settle:
+
+- Whether "goes down at once" by hand was this stop. It fits (Enter at the menu, then a stop within
+  a second of guest time), but the session that failed was not captured
+- PUSH SP is now the 8086 behaviour on purpose. M4 has to turn it back when the machine becomes a
+  386, together with the FLAGS bits, or the same inconsistency returns the other way round
+- The installer was declined. Going on with `y` was not tried

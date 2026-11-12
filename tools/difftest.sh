@@ -84,9 +84,21 @@ else
     echo "skip  elks shell (images/fd2880.img is not there)"
 fi
 
-# FreeDOS: F5 skips CONFIG.SYS, the kernel asks where the shell is, then commands run at A:\>.
+# FreeDOS, twice: the normal startup (language menu, decline the installer, prompt), and the F5
+# path (skip CONFIG.SYS, tell the kernel where the shell is, prompt).
 if [ -f images/fd14boot.img ]; then
     for exe in build/g86m-debug build/g86m; do
+        out=$("$exe" --headless --max 3000000000 \
+            --wait "Select from Menu" --type '\n' \
+            --wait "[Y,N]?" --type 'n\n' \
+            --wait 'A:\>' --type 'dir /w\n' --wait "bytes free" \
+            images/fd14boot.img 2>"build/freedos.err")
+        if [ $? -eq 0 ] && echo "$out" | grep -q "has been aborted"; then
+            echo "ok    freedos startup ($(basename "$exe"))"
+        else
+            fail=1
+            echo "FAIL  freedos startup ($(basename "$exe")): $(tail -1 build/freedos.err)"
+        fi
         out=$("$exe" --headless --max 900000000 \
             --wait "FreeDOS kernel" --type '\k3F' \
             --wait "full shell command line" --type '\FREEDOS\BIN\COMMAND.COM\n' \
@@ -95,14 +107,14 @@ if [ -f images/fd14boot.img ]; then
             --type 'echo Done-%COMSPEC%\n' --wait 'Done-A:\FREEDOS\BIN\COMMAND.COM' \
             images/fd14boot.img 2>"build/freedos.err")
         if [ $? -eq 0 ] && echo "$out" | grep -q "FreeDOS kernel 2043"; then
-            echo "ok    freedos prompt ($(basename "$exe"))"
+            echo "ok    freedos with F5 ($(basename "$exe"))"
         else
             fail=1
-            echo "FAIL  freedos prompt ($(basename "$exe")): $(tail -1 build/freedos.err)"
+            echo "FAIL  freedos with F5 ($(basename "$exe")): $(tail -1 build/freedos.err)"
         fi
     done
 else
-    echo "skip  freedos prompt (images/fd14boot.img is not there)"
+    echo "skip  freedos startup and freedos with F5 (images/fd14boot.img is not there)"
 fi
 
 # The interactive console, driven through a pseudo-terminal. It takes the images that are there.

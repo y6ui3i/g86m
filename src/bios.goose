@@ -310,7 +310,12 @@ fn int16() {
 
 // ---- Entry ----
 
+// How often each BIOS service was called, by interrupt number and AH. Reported by --ports.
+var bios_calls: u32[65536] = [0; 65536];
+
 fn bios_call(n: u8) {
+    let slot: i64 = (n as i64) << 8 | r8(4);
+    bios_calls[slot] += 1;
     match n {
         0x08 => {                                  // IRQ 0: count the tick, then end the interrupt
             let lo = rd16(0, 0x46C) + 1;

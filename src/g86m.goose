@@ -14,8 +14,10 @@
 //   --type TEXT    script step: type TEXT at the keyboard (\n is Enter; \kNN presses the key
 //                  with scancode NN in hex, so \k3F is F5)
 //   --screen       print the text screen when the run ends
-//   --ports        report the I/O ports the guest used that nothing answered
+//   --ports        report the I/O ports the guest used that nothing answered, and how often
+//                  each BIOS service was called
 //   --headless     never open the interactive console
+//   --dump FILE    write the 1 MB of guest memory to FILE when the run ends
 //
 // Script steps run in the order given, and the run ends when the last one is done.
 
@@ -205,6 +207,7 @@ fn main() {
     var show_screen = false;
     var show_ports = false;
     var headless = false;
+    var dump_arg = 0;
     var max = 20000000000;
     var path: const u8[:] = "";
     var i = 1;
@@ -213,6 +216,7 @@ fn main() {
         else if a[i] == "--screen" { show_screen = true; }
         else if a[i] == "--ports" { show_ports = true; }
         else if a[i] == "--headless" { headless = true; }
+        else if a[i] == "--dump" && i + 1 < a.len { i++; dump_arg = i; }
         else if a[i] == "--max" && i + 1 < a.len {
             i++;
             let n, ok = parse_int(a[i]);
@@ -260,7 +264,11 @@ fn main() {
     if trace { trace_line(); }
     let result = if interactive { run_console(max) } else { run_until(max) };
     let ms = (clock_ns() - t0) / 1000000;
-    if interactive { con_close(); }
+    if interactive {
+        con_close();
+        // The reason was written while the console's screen was up, where it cannot be seen.
+        if stop_message.len > 0 { write_stderr(stop_message); }
+    }
     if trace { write_stdout(trace_buf); }
 
     if show_screen || scripted || interactive {
@@ -273,17 +281,32 @@ fn main() {
     }
 
     var stats: u8[>..] = [];
-    format(stats, "steps ", vtime, " halted ", cpu.halted, " fault ", cpu.fault, " ms ", ms);
+    format(stats, "steps ", vtime, " halted ", cpu.halted, " fault ", cpu.fault, " ms ", ms, " at ");
+    format_int(stats, cpu.segs[CS], 16, 4, '0');
+    format(stats, ":");
+    format_int(stats, cpu.ip, 16, 4, '0');
     if scripted { format(stats, " script ", step_pos, "/", step_kind.len); }
     if !scripted && !interactive { format(stats, " console \"", tty, "\""); }
     format(stats, "\n");
     write_stderr(stats);
+    if dump_arg > 0 {
+        if !write_file(a[dump_arg], ram[..]) { write_stderr("g86m: cannot write the memory dump\n"); }
+    }
     if show_ports {
         var ports: u8[>..] = [];
         for count, port in unknown_ports {
             if count > 0 {
                 format(ports, "port ");
                 format_int(ports, port, 16, 4, '0');
+                format(ports, " x", count, "\n");
+            }
+        }
+        for count, slot in bios_calls {
+            if count > 0 && slot >> 8 >= 0x10 {
+                format(ports, "int ");
+                format_int(ports, slot >> 8, 16, 2, '0');
+                format(ports, " ah=");
+                format_int(ports, slot & 0xFF, 16, 2, '0');
                 format(ports, " x", count, "\n");
             }
         }
