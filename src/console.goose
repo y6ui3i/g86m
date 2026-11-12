@@ -11,6 +11,8 @@ extern fn con_open() -> i32;
 extern fn con_close();
 extern fn con_read() -> i32;
 extern fn con_sleep_us(us: i32);
+extern fn con_rows() -> i32;
+extern fn con_cols() -> i32;
 
 // ---- Keys ----
 
@@ -141,6 +143,13 @@ var shown: u8[4000] = [0xFF; 4000];      // what the terminal currently shows; F
 var shown_cursor = -1;
 var out: u8[>..];
 
+// The part of the 80x25 screen that fits in the terminal. When the terminal is smaller than the
+// screen, the view follows the guest's cursor.
+var view_rows = 25;
+var view_cols = 80;
+var view_top = 0;
+var view_left = 0;
+
 fn put_char(c: u8) {
     if c >= 0x20 && c < 0x7F { out.push(c); return; }
     if c < 0x80 { out.push(' '); return; }
@@ -155,9 +164,10 @@ fn put_char(c: u8) {
     }
 }
 
+// Moves the terminal's cursor to the screen cell pos, which must be inside the view.
 fn move_to(pos: i64) {
     out.push(ESC);
-    format(out, "[", pos / 80 + 1, ";", pos % 80 + 1, "H");
+    format(out, "[", pos / 80 - view_top + 1, ";", pos % 80 - view_left + 1, "H");
 }
 
 // CGA colour numbers have blue in bit 0 and red in bit 2; ANSI has them the other way round.
@@ -170,25 +180,62 @@ fn set_attr(attr: u8) {
     format(out, "[", (if fg & 8 != 0 { 90 } else { 30 }) + ansi_colour(fg), ";", 40 + ansi_colour(bg), "m");
 }
 
+// Where a view of size cells should start so that it contains at, without leaving 0..limit.
+fn view_start(start: i64, size: i64, at: i64, limit: i64) -> i64 {
+    var s = start;
+    if at < s { s = at; }
+    if at >= s + size { s = at - size + 1; }
+    if s + size > limit { s = limit - size; }
+    if s < 0 { s = 0; }
+    return s;
+}
+
 // Sends the cells that changed since the last call, then puts the cursor where the guest has it.
 fn console_render() {
-    var pen = -1;            // where the terminal's cursor is after the last character sent
-    var attr = -1;
-    for i in 2000 {
-        let ch = ram[0xB8000 + i * 2];
-        let at = ram[0xB8000 + i * 2 + 1];
-        if ch == shown[i * 2] && at == shown[i * 2 + 1] { continue; }
-        shown[i * 2] = ch;
-        shown[i * 2 + 1] = at;
-        if pen != i { move_to(i); }
-        if attr != at { set_attr(at); attr = at; }
-        put_char(ch);
-        pen = if i % 80 == 79 { -1 } else { i + 1 };
-    }
     let hi: i64 = crtc[14];
     let lo: i64 = crtc[15];
     var cursor = hi << 8 | lo;
     if cursor >= 2000 { cursor = 1999; }
+
+    // Fit the view to the terminal as it is now, and keep the guest's cursor inside it.
+    let term_rows: i64 = con_rows();
+    let term_cols: i64 = con_cols();
+    let rows = if term_rows < 25 { term_rows } else { 25 };
+    let cols = if term_cols < 80 { term_cols } else { 80 };
+    let top = view_start(view_top, rows, cursor / 80, 25);
+    // Sideways the view goes back to column 0 as soon as the cursor fits, so that a prompt at the
+    // start of a line is not left hidden after a long line pushed the view right.
+    let left = view_start(0, cols, cursor % 80, 80);
+    if rows != view_rows || cols != view_cols || top != view_top || left != view_left {
+        view_rows = rows;
+        view_cols = cols;
+        view_top = top;
+        view_left = left;
+        for i in 4000 { shown[i] = 0xFF; }
+        shown_cursor = -1;
+        out.push(ESC);
+        format(out, "[0m");
+        out.push(ESC);
+        format(out, "[2J");
+    }
+
+    var pen = -1;            // the screen cell the terminal's cursor is on after the last character
+    var attr = -1;
+    for row in view_top..view_top + view_rows {
+        for col in view_left..view_left + view_cols {
+            let i = row * 80 + col;
+            let ch = ram[0xB8000 + i * 2];
+            let at = ram[0xB8000 + i * 2 + 1];
+            if ch == shown[i * 2] && at == shown[i * 2 + 1] { continue; }
+            shown[i * 2] = ch;
+            shown[i * 2 + 1] = at;
+            if pen != i { move_to(i); }
+            if attr != at { set_attr(at); attr = at; }
+            put_char(ch);
+            // After the last column of the view the terminal's cursor position is not dependable.
+            pen = if col == view_left + view_cols - 1 { -1 } else { i + 1 };
+        }
+    }
     if out.len > 0 || cursor != shown_cursor {
         move_to(cursor);
         shown_cursor = cursor;

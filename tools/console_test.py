@@ -21,10 +21,14 @@ TOKEN = re.compile(r"\x1b\[([0-9;?]*)([A-Za-z])|\x1b.|([^\x1b])", re.S)
 
 
 class Screen:
-    def __init__(self):
-        self.cells = [[" "] * 80 for _ in range(25)]
+    """A terminal of the given size: the grid, the cursor, and whether anything aimed outside it."""
+
+    def __init__(self, rows=25, cols=80):
+        self.rows, self.cols = rows, cols
+        self.cells = [[" "] * cols for _ in range(rows)]
         self.row = self.col = 0
         self.pending = b""
+        self.out_of_bounds = None
 
     def feed(self, data):
         data = self.pending + data
@@ -38,14 +42,19 @@ class Screen:
         for params, final, char in TOKEN.findall(text):
             if final == "H":
                 parts = (params.split(";") + ["1", "1"])[:2]
-                self.row = min(max(int(parts[0] or 1) - 1, 0), 24)
-                self.col = min(max(int(parts[1] or 1) - 1, 0), 79)
+                row, col = int(parts[0] or 1), int(parts[1] or 1)
+                if row > self.rows or col > self.cols:
+                    self.out_of_bounds = (row, col)
+                self.row = min(max(row - 1, 0), self.rows - 1)
+                self.col = min(max(col - 1, 0), self.cols - 1)
             elif final == "J":
-                self.cells = [[" "] * 80 for _ in range(25)]
+                self.cells = [[" "] * self.cols for _ in range(self.rows)]
             elif char and char >= " ":
-                if self.col < 80:
+                if self.col < self.cols:
                     self.cells[self.row][self.col] = char
                     self.col += 1
+                else:
+                    self.out_of_bounds = (self.row + 1, self.col + 1)
 
     def lines(self):
         return ["".join(row).rstrip() for row in self.cells]
@@ -55,10 +64,11 @@ class Screen:
         return self.col == 2 and "".join(self.cells[self.row][:2]) == "# "
 
 
-def main():
-    exe, image = sys.argv[1], sys.argv[2]
+def session(exe, image, rows, cols, full):
+    """One console session on a terminal of rows by cols. full runs every check; otherwise only
+    the ones that show the screen fits the terminal."""
     master, slave = pty.openpty()
-    termios.tcsetwinsize(slave, (30, 100))
+    termios.tcsetwinsize(slave, (rows, cols))
     before = termios.tcgetattr(slave)
     pid = os.fork()
     if pid == 0:
@@ -68,7 +78,7 @@ def main():
         os.close(master)
         os.execv(exe, [exe, image])
 
-    screen = Screen()
+    screen = Screen(min(rows, 25), min(cols, 80))
     raw = b""
 
     def pump(seconds):
@@ -87,7 +97,7 @@ def main():
             os.kill(pid, 9)
         except ProcessLookupError:
             pass
-        print("FAIL  console:", message)
+        print(f"FAIL  console {cols}x{rows}:", message)
         for line in screen.lines():
             if line:
                 print("    |" + line)
@@ -116,6 +126,46 @@ def main():
     wait("uname output", contains("ibmpc i8086"), 30)
     wait("the prompt after uname", screen.at_prompt, 30)
 
+    # Scroll the guest's screen well past the height of the terminal, then check a command still
+    # shows up where the prompt is.
+    os.write(master, b"ls /bin\r")
+    wait("the prompt after ls", lambda: screen.at_prompt() and contains("vi")(), 30)
+    os.write(master, b"echo vi''ew\r")
+    wait("output after scrolling", has_line("view"), 30)
+    wait("the prompt after scrolling", screen.at_prompt, 30)
+    if screen.out_of_bounds:
+        fail(f"the console addressed row {screen.out_of_bounds[0]}, column {screen.out_of_bounds[1]}")
+
+    slept = interrupted = 0.0
+    if full:
+        slept, interrupted = timing_and_keys(master, screen, wait, has_line, pump, fail)
+
+    # Checked before leaving: on exit g86m prints the screen as plain text, which is not console
+    # output and does not go through the grid's rules.
+    if screen.out_of_bounds:
+        fail(f"the console addressed row {screen.out_of_bounds[0]}, column {screen.out_of_bounds[1]}")
+    os.write(master, b"\x1d")
+    deadline = time.monotonic() + 10
+    status = None
+    while time.monotonic() < deadline:
+        pump(0.02)
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+    else:
+        fail("did not exit within 10s of Ctrl-]")
+    if os.waitstatus_to_exitcode(status) != 0:
+        fail(f"exit status {os.waitstatus_to_exitcode(status)}")
+    if b"\x1b[?1049l" not in raw:
+        fail("did not leave the alternate screen")
+    if termios.tcgetattr(slave) != before:
+        fail("terminal modes were not restored")
+    os.close(master)
+    os.close(slave)
+    return boot_seconds, slept, interrupted
+
+
+def timing_and_keys(master, screen, wait, has_line, pump, fail):
     # The quotes keep the word out of the echoed command line, so only the command's own output
     # can be a line that reads exactly `slept`.
     os.write(master, b"sleep 3; echo sl''ept\r")
@@ -143,24 +193,18 @@ def main():
     wait("Ctrl-C to interrupt sleep 30", screen.at_prompt, 5)
     interrupted = time.monotonic() - t2
 
-    os.write(master, b"\x1d")
-    deadline = time.monotonic() + 10
-    status = None
-    while time.monotonic() < deadline:
-        pump(0.02)
-        done, status = os.waitpid(pid, os.WNOHANG)
-        if done:
-            break
-    else:
-        fail("did not exit within 10s of Ctrl-]")
-    if os.waitstatus_to_exitcode(status) != 0:
-        fail(f"exit status {os.waitstatus_to_exitcode(status)}")
-    if b"\x1b[?1049l" not in raw:
-        fail("did not leave the alternate screen")
-    if termios.tcgetattr(slave) != before:
-        fail("terminal modes were not restored")
-    print(f"ok    console (boot to login {boot_seconds:.1f}s, sleep 3 took {slept:.2f}s, "
+    return slept, interrupted
+
+
+def main():
+    exe, image = sys.argv[1], sys.argv[2]
+    boot, slept, interrupted = session(exe, image, 30, 100, True)
+    print(f"ok    console 100x30 (boot to login {boot:.1f}s, sleep 3 took {slept:.2f}s, "
           f"Ctrl-C ended sleep 30 after {interrupted:.2f}s)")
+    # Terminals smaller than the guest's 80x25 screen: shorter, and both shorter and narrower.
+    for rows, cols in ((10, 80), (12, 60)):
+        session(exe, image, rows, cols, False)
+        print(f"ok    console {cols}x{rows} (the view follows the cursor)")
 
 
 main()

@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -49,6 +50,19 @@ int32_t con_open(void) {
 }
 
 void con_close(void) { restore(); }
+
+// The terminal's size in character cells; 25 by 80 when it cannot be read.
+static struct winsize size(void) {
+    struct winsize ws = { 25, 80, 0, 0 };
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_row == 0 || ws.ws_col == 0) {
+        ws.ws_row = 25;
+        ws.ws_col = 80;
+    }
+    return ws;
+}
+
+int32_t con_rows(void) { return size().ws_row; }
+int32_t con_cols(void) { return size().ws_col; }
 
 // One byte from the keyboard, or -1 when nothing is waiting.
 int32_t con_read(void) {

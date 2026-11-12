@@ -295,7 +295,32 @@ Not checked, because a pseudo-terminal test cannot see it:
 
 - How it looks: colours, the cursor, the code page 437 line-drawing characters. ELKS at a shell
   prompt uses none of the last
-- A host terminal smaller than 80x25. Nothing handles it; lines will wrap
+- A host terminal smaller than 80x25. Nothing handles it; lines will wrap (this was the first
+  thing to go wrong by hand; see the follow-up below)
 - Arrow keys, function keys and the editing keys. The translation is written but no test presses them
 - How it feels to type. The guest runs at about 4.77 million instructions per second, a made-up
   figure that follows from 4 instructions per timer tick
+
+### Follow-up: first try by hand (2026-11-12)
+
+The first session by hand looked broken: prompts repeated down the screen, and the output of `ls`
+appeared as one line with a `#` written over its start. The pasted screen had 10 lines.
+
+- **Cause, as far as the evidence goes**: the terminal was shorter than 25 rows. The console
+  addressed rows up to 25, a terminal clamps a row past its last line to the last line, and so the
+  lower rows of the guest's screen were all drawn on top of each other there. This is the case the
+  result above listed as not handled. It is inferred from the 10-line paste and from the fix
+  curing a 10-row pseudo-terminal; the terminal's size at the time was not measured
+- **Fix**: the console reads the terminal's size on every redraw and draws only the part of the
+  80x25 screen that fits. Down the screen the view follows the guest's cursor and otherwise stays
+  put; sideways it returns to column 0 whenever the cursor fits. A change of size or view clears
+  and redraws
+- **Test**: `tools/console_test.py` now also scrolls the guest's screen with `ls /bin`, fails if
+  the console ever addresses a cell outside the terminal, and repeats the session on an 80x10 and
+  a 60x12 terminal. All three sizes pass
+
+The 60x12 run failed once before it passed: after a line longer than the view, the view stayed
+shifted right and hid the `# ` prompt. That is why the sideways rule differs from the vertical one.
+
+Still not checked on a real terminal: colours, the cursor, line-drawing characters, arrow and
+function keys, and resizing the window while it runs.

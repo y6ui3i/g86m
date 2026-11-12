@@ -55,8 +55,8 @@ With `--trace`, g86m prints the state at every instruction boundary, one line ea
 
 An image that is not 512 bytes is booted as floppy drive A. Started from a terminal, it opens the
 console: the guest's 80x25 text screen is drawn in the terminal, the keyboard goes to the guest,
-and guest time is paced against real time. **Ctrl-]** leaves it. The terminal needs to be at least
-80 columns by 25 rows.
+and guest time is paced against real time. **Ctrl-]** leaves it. In a terminal smaller than 80
+columns by 25 rows, the console shows the part of the screen around the guest's cursor.
 
 ```bash
 ./build/g86m images/fd2880.img
