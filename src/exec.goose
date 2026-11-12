@@ -4,11 +4,13 @@
 import state;
 import alu;
 import bios;
+import dev;
 
 // ---- Decode state that lives for one instruction ----
 
 var seg_ovr = -1;            // segment override: -1 none, 0..3 are ES CS SS DS
 var rep: u8 = 0;             // 0 none, 1 REPNE (F2), 2 REP/REPE (F3)
+var shadow = false;         // the instruction just executed holds interrupts off for one more
 var insn_ip: u16 = 0;        // start of the instruction, prefixes included; where a fault returns to
 var m_mod: u8 = 0;
 var m_reg: u8 = 0;
@@ -310,6 +312,7 @@ fn step() {
     }
 
     insn_ip = cpu.ip;
+    shadow = false;
     seg_ovr = -1;
     rep = 0;
     var op = fetch8();
@@ -355,7 +358,7 @@ fn step() {
         0x07 => { cpu.segs[ES] = pop16(); },
         0x0E => { push16(cpu.segs[CS]); },
         0x16 => { push16(cpu.segs[SS]); },
-        0x17 => { cpu.segs[SS] = pop16(); },
+        0x17 => { cpu.segs[SS] = pop16(); shadow = true; },
         0x1E => { push16(cpu.segs[DS]); },
         0x1F => { cpu.segs[DS] = pop16(); },
         0x27 => { daa_das(false); },
@@ -419,7 +422,7 @@ fn step() {
         0x8A, 0x8B => { let w = width(op); decode_modrm(); set_regw(m_reg, w, rm_read(w)); },
         0x8C => { decode_modrm(); rm_write(16, cpu.segs[m_reg & 3]); },
         0x8D => { decode_modrm(); set_r16(m_reg, ea_off); },
-        0x8E => { decode_modrm(); cpu.segs[m_reg & 3] = rm_read(16) as! u16; },
+        0x8E => { decode_modrm(); cpu.segs[m_reg & 3] = rm_read(16) as! u16; if m_reg & 3 == SS { shadow = true; } },
         0x8F => { let v = pop16(); decode_modrm(); rm_write(16, v); },
 
         0x90..0x98 => { let t = r16(AX); set_r16(AX, r16(op)); set_r16(op, t); },
@@ -511,17 +514,17 @@ fn step() {
         0xE1 => { set_r16(CX, r16(CX) - 1); jump_rel8(r16(CX) != 0 && flag(ZF)); },
         0xE2 => { set_r16(CX, r16(CX) - 1); jump_rel8(r16(CX) != 0); },
         0xE3 => { jump_rel8(r16(CX) == 0); },
-        0xE4 => { let port = fetch8(); set_r8(0, port_in(port) as! u8); },
+        0xE4 => { let port = fetch8(); set_r8(0, port_in8(port)); },
         0xE5 => { let port = fetch8(); set_r16(AX, port_in(port)); },
-        0xE6 => { let port = fetch8(); port_out(port, r8(0)); },
+        0xE6 => { let port = fetch8(); port_out8(port, r8(0)); },
         0xE7 => { let port = fetch8(); port_out(port, r16(AX)); },
         0xE8 => { let d = fetch16(); push16(cpu.ip); cpu.ip += d; },
         0xE9 => { let d = fetch16(); cpu.ip += d; },
         0xEA => { let off = fetch16(); let seg = fetch16(); cpu.segs[CS] = seg; cpu.ip = off; },
         0xEB => { jump_rel8(true); },
-        0xEC => { set_r8(0, port_in(r16(DX)) as! u8); },
+        0xEC => { set_r8(0, port_in8(r16(DX))); },
         0xED => { set_r16(AX, port_in(r16(DX))); },
-        0xEE => { port_out(r16(DX), r8(0)); },
+        0xEE => { port_out8(r16(DX), r8(0)); },
         0xEF => { port_out(r16(DX), r16(AX)); },
 
         0xF4 => { cpu.halted = true; },
@@ -530,7 +533,7 @@ fn step() {
         0xF8 => { set_flag(CF, false); },
         0xF9 => { set_flag(CF, true); },
         0xFA => { set_flag(IF, false); },
-        0xFB => { set_flag(IF, true); },
+        0xFB => { if !flag(IF) { shadow = true; } set_flag(IF, true); },
         0xFC => { set_flag(DF, false); },
         0xFD => { set_flag(DF, true); },
         0xFE, 0xFF => { group45(op); },

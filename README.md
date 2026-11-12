@@ -9,8 +9,10 @@ its per-instruction trace is compared with g86m's.
 
 ## Status
 
-M1 (the 16-bit real-mode instruction set) is done. Eleven tests match rustx86 line for line on the
-state at every instruction boundary. The history and the numbers are in
+M2 is done: ELKS 0.9.1 boots from a floppy image to its shell, and a scripted session logs in as
+root and runs commands. There is no interactive front end yet; the shell is driven by a script.
+The M1 instruction tests (eleven of them) still match rustx86 line for line on the state at every
+instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
 [docs/goose-notes.md](docs/goose-notes.md).
 
@@ -18,7 +20,7 @@ state at every instruction boundary. The history and the numbers are in
 |---|---|---|
 | M0 | Check that the core of an emulator can be written in Goose | done |
 | M1 | The 16-bit real-mode instruction set; a boot sector prints Hello, World | done |
-| M2 | The ELKS shell | not started |
+| M2 | The ELKS shell | done (scripted; no interactive front end yet) |
 | M3 | FreeDOS | not started |
 | M4 | 386 protected mode and paging; pass test386 | not started |
 | M5 | 32-bit Linux and busybox | not started |
@@ -51,11 +53,24 @@ goose build -o build/g86m src/g86m.goose
 
 With `--trace`, g86m prints the state at every instruction boundary, one line each.
 
+An image that is not 512 bytes is booted as floppy drive A. `--wait` and `--type` script the
+session: each `--wait` runs until its text is on the screen, each `--type` types at the keyboard.
+
+```bash
+./build/g86m --wait "login:" --type "root\n" --wait "# " --type "uname -a\n" --wait "i8086" images/fd2880.img
+```
+
+Disk images are not in the repository. `images/fd2880.img` is the ELKS 0.9.1 2.88 MB floppy
+(`fd2880-minix.img` from the [ELKS releases](https://github.com/ghaerr/elks/releases/tag/v0.9.1)).
+
 ## Tests
 
 ```bash
 tools/difftest.sh
 ```
+
+The ELKS session above runs as part of it when `images/fd2880.img` is there, and is reported as
+skipped when it is not.
 
 It assembles one boot sector per instruction group (`tests/asm/`) with NASM, runs each, and compares
 the trace with the expected one in `tests/expected/`. The expected traces come from trace16
@@ -69,8 +84,9 @@ To regenerate them, run `ORACLE=/path/to/trace16 tools/difftest.sh`.
 | [src/state.goose](src/state.goose) | Registers, flags, 1 MB of RAM, the stack, interrupts |
 | [src/alu.goose](src/alu.goose) | Arithmetic and flags, shifts and rotates |
 | [src/exec.goose](src/exec.goose) | Instruction decode and execution |
-| [src/bios.goose](src/bios.goose) | BIOS services handled by the emulator, I/O ports |
-| [src/g86m.goose](src/g86m.goose) | Startup and the command line |
+| [src/bios.goose](src/bios.goose) | Power-on setup and the BIOS services the emulator performs: screen, disk, keyboard, time |
+| [src/dev.goose](src/dev.goose) | Interrupt controllers, timer, keyboard controller, I/O port dispatch |
+| [src/g86m.goose](src/g86m.goose) | The run loop, interrupt delivery, the session script, the command line |
 
 The boot sectors in `testdata/` are copied from rustx86's `asm/` as they are, including the Japanese
 comments in their sources. `probe/` holds the M0 probes.

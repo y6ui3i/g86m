@@ -63,4 +63,24 @@ for bin in build/s_*.bin; do
         fi
     done
 done
+
+# Operating-system boots. The disk images are not in the repository; a missing image is skipped
+# and reported, never counted as a pass.
+if [ -f images/fd2880.img ]; then
+    for exe in build/g86m-debug build/g86m; do
+        out=$("$exe" --max 600000000 \
+            --wait "login:" --type "root\n" --wait "# " \
+            --type "uname -a\n" --wait "ibmpc i8086" \
+            --type "ls /bin | head -3; echo done-\$?\n" --wait "done-0" \
+            images/fd2880.img 2>"build/elks.err")
+        if [ $? -eq 0 ] && echo "$out" | grep -q "ELKS elks 0.9.1"; then
+            echo "ok    elks shell ($(basename "$exe"))"
+        else
+            fail=1
+            echo "FAIL  elks shell ($(basename "$exe")): $(tail -1 build/elks.err)"
+        fi
+    done
+else
+    echo "skip  elks shell (images/fd2880.img is not there)"
+fi
 exit $fail
