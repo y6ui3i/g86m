@@ -308,6 +308,13 @@ fn step() {
     if cpu.segs[CS] == BIOS_SEG && cpu.ip < 256 {
         bios_call(cpu.ip as! u8);
         iret();
+        if bios_idle {
+            // The service is waiting for an interrupt. A real BIOS waits with interrupts on,
+            // whatever the caller's IF was.
+            bios_idle = false;
+            set_flag(IF, true);
+            cpu.halted = true;
+        }
         return;
     }
 

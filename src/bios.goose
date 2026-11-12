@@ -221,7 +221,15 @@ fn int13() {
 
 // ---- Keyboard (BIOS queue in the data area) ----
 
-let ASCII_OF_SCAN = "\0\x1b1234567890-=\x08\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
+// ASCII for scancodes 00h..39h, without and with Shift.
+let ASCII_PLAIN = "\0\x1b1234567890-=\x08\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
+let ASCII_SHIFT = "\0\x1b!@#$%^&*()_+\x08\0QWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
+
+var key_shift = false;
+var key_ctrl = false;
+var key_alt = false;
+var key_e0 = false;          // the previous byte was the E0h prefix of an extended key
+var bios_idle = false;       // a BIOS service is waiting for an interrupt: idle until one comes
 
 fn bios_key_available() -> bool { return rd16(0, BDA_KB_HEAD) != rd16(0, BDA_KB_TAIL); }
 
@@ -235,27 +243,67 @@ fn bios_key_put(scan: u8, ascii: u8) {
     wr16(0, BDA_KB_TAIL, next);
 }
 
+// IRQ 1: turns the scancode at the keyboard controller into an entry in the BIOS queue.
+fn int09() {
+    let byte = kbd_read_data();
+    if byte == 0xE0 { key_e0 = true; return; }
+    let extended = key_e0;
+    key_e0 = false;
+    let down = byte & 0x80 == 0;
+    let scan = byte & 0x7F;
+    if scan == 0x2A || scan == 0x36 { if !extended { key_shift = down; } }
+    else if scan == 0x1D { key_ctrl = down; }
+    else if scan == 0x38 { key_alt = down; }
+    else if down {
+        var ascii: u8 = 0;
+        if extended { ascii = 0xE0; }
+        else if scan < ASCII_PLAIN.len {
+            ascii = if key_shift { ASCII_SHIFT[scan] } else { ASCII_PLAIN[scan] };
+            if key_ctrl && ascii >= 0x40 { ascii &= 0x1F; }
+        }
+        if key_alt && !extended { ascii = 0; }
+        bios_key_put(scan, ascii);
+    }
+    var flags: u8 = 0;
+    if key_shift { flags |= 0x02; }
+    if key_ctrl { flags |= 0x04; }
+    if key_alt { flags |= 0x08; }
+    wr8(0, 0x417, flags);
+}
+
+// A key as the old services (AH=00h/01h) report it: an extended key has ASCII 0, not E0h.
+fn plain_key(k: u16) -> u16 {
+    if k & 0xFF == 0xE0 && k >> 8 != 0 { return k & 0xFF00; }
+    return k;
+}
+
 fn int16() {
     let ah = r8(4);
     match ah {
         0x00, 0x10 => {
             if !bios_key_available() {
-                // Nothing typed yet: run the INT again once something else has happened.
-                cpu.ip = rd16(cpu.segs[SS], r16(SP)) - 2;
-                wr16(cpu.segs[SS], r16(SP), cpu.ip);
+                // Nothing typed yet: return to the INT instruction itself and idle until an
+                // interrupt, so the call is made again once something has happened.
+                let sp = r16(SP);
+                wr16(cpu.segs[SS], sp, rd16(cpu.segs[SS], sp) - 2);
+                bios_idle = true;
                 return;
             }
             let head = rd16(0, BDA_KB_HEAD);
-            set_r16(AX, rd16(0x40, head));
+            let k = rd16(0x40, head);
+            set_r16(AX, if ah == 0x00 { plain_key(k) } else { k });
             var next = head + 2;
             if next >= KB_BUF_END { next = KB_BUF_START; }
             wr16(0, BDA_KB_HEAD, next);
         },
         0x01, 0x11 => {
-            if bios_key_available() { set_r16(AX, rd16(0x40, rd16(0, BDA_KB_HEAD))); ret_zero(false); }
-            else { ret_zero(true); }
+            if bios_key_available() {
+                let k = rd16(0x40, rd16(0, BDA_KB_HEAD));
+                set_r16(AX, if ah == 0x01 { plain_key(k) } else { k });
+                ret_zero(false);
+            } else { ret_zero(true); }
         },
-        0x02, 0x12 => { set_r8(0, 0); },
+        0x02, 0x12 => { set_r8(0, rd8(0, 0x417)); },
         _ => {},
     }
 }
@@ -270,11 +318,7 @@ fn bios_call(n: u8) {
             if lo == 0 { wr16(0, 0x46E, rd16(0, 0x46E) + 1); }
             pic_command(0, 0x20);
         },
-        0x09 => {                                  // IRQ 1: move the scancode into the BIOS queue
-            let scan = kbd_read_data();
-            if scan < 0x80 && scan < ASCII_OF_SCAN.len { bios_key_put(scan, ASCII_OF_SCAN[scan]); }
-            pic_command(0, 0x20);
-        },
+        0x09 => { int09(); pic_command(0, 0x20); },
         0x0A..0x10 => { pic_command(0, 0x20); },   // other hardware interrupts: just acknowledge
         0x10 => { int10(); },
         0x11 => { set_r16(AX, rd16(0, 0x410)); },

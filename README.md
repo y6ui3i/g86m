@@ -9,8 +9,10 @@ its per-instruction trace is compared with g86m's.
 
 ## Status
 
-M2 is done: ELKS 0.9.1 boots from a floppy image to its shell. It can be used by hand in the
-terminal console, or driven by a script.
+M3 is done: FreeDOS 1.4 boots from its floppy to the `A:\>` prompt and runs the shell's commands,
+and ELKS 0.9.1 (M2) boots to its shell. Both can be used by hand in the terminal console, or driven
+by a script. FreeDOS has to be started with F5 (below): its normal startup runs a program that
+uses 386 instructions, which need M4.
 The M1 instruction tests (eleven of them) still match rustx86 line for line on the state at every
 instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
@@ -21,7 +23,7 @@ instruction boundary. The history and the numbers are in
 | M0 | Check that the core of an emulator can be written in Goose | done |
 | M1 | The 16-bit real-mode instruction set; a boot sector prints Hello, World | done |
 | M2 | The ELKS shell | done |
-| M3 | FreeDOS | not started |
+| M3 | FreeDOS to the `A:\>` prompt | done (with F5; no DOS program beyond the shell has been run) |
 | M4 | 386 protected mode and paging; pass test386 | not started |
 | M5 | 32-bit Linux and busybox | not started |
 
@@ -62,6 +64,13 @@ columns by 25 rows, the console shows the part of the screen around the guest's 
 ./build/g86m images/fd2880.img
 ```
 
+For FreeDOS, press **F5** while the `FreeDOS kernel` banner is on the screen, and answer
+`\FREEDOS\BIN\COMMAND.COM` when it asks for the shell:
+
+```bash
+./build/g86m images/fd14boot.img
+```
+
 `--wait` and `--type` script a session instead: each `--wait` runs until its text is on the screen,
 each `--type` types at the keyboard. A scripted run is not paced and skips idle time.
 
@@ -70,7 +79,8 @@ each `--type` types at the keyboard. A scripted run is not paced and skips idle 
 ```
 
 Disk images are not in the repository. `images/fd2880.img` is the ELKS 0.9.1 2.88 MB floppy
-(`fd2880-minix.img` from the [ELKS releases](https://github.com/ghaerr/elks/releases/tag/v0.9.1)).
+(`fd2880-minix.img` from the [ELKS releases](https://github.com/ghaerr/elks/releases/tag/v0.9.1)),
+and `images/fd14boot.img` is the FreeDOS 1.4 boot floppy from [freedos.org](https://www.freedos.org/).
 
 ## Tests
 
@@ -78,9 +88,9 @@ Disk images are not in the repository. `images/fd2880.img` is the ELKS 0.9.1 2.8
 tools/difftest.sh
 ```
 
-When `images/fd2880.img` is there, it also runs the scripted ELKS session and drives the console
-through a pseudo-terminal ([tools/console_test.py](tools/console_test.py)). Without the image both
-are reported as skipped.
+With the images in `images/`, it also runs scripted ELKS and FreeDOS sessions and drives the
+console through a pseudo-terminal ([tools/console_test.py](tools/console_test.py)). A session whose
+image is missing is reported as skipped.
 
 It assembles one boot sector per instruction group (`tests/asm/`) with NASM, runs each, and compares
 the trace with the expected one in `tests/expected/`. The expected traces come from trace16

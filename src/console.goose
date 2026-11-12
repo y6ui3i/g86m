@@ -5,6 +5,7 @@ import std;
 import os;
 import state;
 import dev;
+import bios;
 
 extern fn con_is_tty() -> i32;
 extern fn con_open() -> i32;
@@ -98,35 +99,51 @@ fn escape_key(last: u8, param: i64) -> bool {
     return false;
 }
 
-// Reads what the host keyboard has sent and queues it for the guest.
+// True when the guest has taken every key given to it so far: from the keyboard controller and,
+// for guests that read keys through the BIOS, from the BIOS queue (15 keys; the rest are dropped).
+fn guest_took_keys() -> bool {
+    return kbd_queued() == 0 && !kbd_full && !bios_key_available();
+}
+
+var key_head = 0;            // the next byte of key_buf to hand to the guest
+
+// Reads what the host keyboard has sent and hands it to the guest one key at a time, as fast as
+// the guest takes them. A paste therefore arrives whole instead of overflowing the guest's queue.
 // False when the user asked to leave: Ctrl-], Ctrl-\ or F12.
 fn console_keys() -> bool {
-    key_buf.clear();
+    let fresh = key_buf.len;
     loop {
         let b = con_read();
         if b < 0 { break; }
         key_buf.push(b as! u8);
     }
-    var i = 0;
-    while i < key_buf.len {
+    // A quit key acts at once, even with other keys still waiting in front of it.
+    for i in fresh..key_buf.len {
         let c = key_buf[i];
-        i++;
         if c == 0x1D || c == 0x1C { return false; }
-        if c == 0x1B && i < key_buf.len && (key_buf[i] == '[' || key_buf[i] == 'O') {
-            i++;
+        if c == '~' && i >= 4 && key_buf[i - 1] == '4' && key_buf[i - 2] == '2' && key_buf[i - 3] == '[' && key_buf[i - 4] == 0x1B {
+            return false;
+        }
+    }
+    if key_head < key_buf.len && guest_took_keys() {
+        let c = key_buf[key_head];
+        key_head++;
+        if c == 0x1B && key_head < key_buf.len && (key_buf[key_head] == '[' || key_buf[key_head] == 'O') {
+            key_head++;
             var param = 0;
-            while i < key_buf.len && key_buf[i] >= '0' && key_buf[i] <= ';' {
-                if key_buf[i] <= '9' { param = param * 10 + (key_buf[i] - '0'); }
-                i++;
+            while key_head < key_buf.len && key_buf[key_head] >= '0' && key_buf[key_head] <= ';' {
+                if key_buf[key_head] <= '9' { param = param * 10 + (key_buf[key_head] - '0'); }
+                key_head++;
             }
-            if i < key_buf.len {
-                if escape_key(key_buf[i], param) { return false; }
-                i++;
+            if key_head < key_buf.len {
+                if escape_key(key_buf[key_head], param) { return false; }
+                key_head++;
             }
         }
         else if c < 0x20 && c != 0x1B && c != '\r' && c != '\n' && c != '\t' && c != 0x08 { type_ctrl(c); }
         else { type_char(c); }
     }
+    if key_head >= key_buf.len { key_buf.clear(); key_head = 0; }
     return true;
 }
 
