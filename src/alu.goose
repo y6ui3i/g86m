@@ -1,5 +1,5 @@
-// 演算とフラグ。値は u32 で運び、幅 w (8 か 16) で切る。
-// 未定義フラグの値は rustx86 (386 実機の期待値に一致) に合わせる。
+// Arithmetic and flags. Values travel as u32 and are cut to the width w (8 or 16).
+// Undefined flags follow rustx86, which matches expected values taken from a real 386.
 
 import state;
 
@@ -20,13 +20,13 @@ fn set_szp(r: u32, w: u8) {
     set_flag(PF, parity8(r));
 }
 
-// 符号拡張して i64 にする。乗除算用。
+// Sign-extends to i64, for multiply and divide.
 fn sx(v: u32, w: u8) -> i64 {
     if v & msb(w) != 0 { return (v as i64) - mask(w) - 1; }
     return v;
 }
 
-// op は命令の 3bit そのまま: 0 ADD 1 OR 2 ADC 3 SBB 4 AND 5 SUB 6 XOR 7 CMP
+// op is the 3-bit field from the instruction: 0 ADD 1 OR 2 ADC 3 SBB 4 AND 5 SUB 6 XOR 7 CMP
 fn alu(op: u8, a: u32, b: u32, w: u8) -> u32 {
     let m = mask(w);
     let s = msb(w);
@@ -58,7 +58,7 @@ fn alu(op: u8, a: u32, b: u32, w: u8) -> u32 {
     return r;
 }
 
-// INC / DEC は CF を変えない。
+// INC and DEC leave CF alone.
 fn inc(a: u32, w: u8) -> u32 {
     let carry = flag(CF);
     let r = alu(0, a, 1, w);
@@ -74,7 +74,7 @@ fn dec(a: u32, w: u8) -> u32 {
 }
 
 // kind: 0 ROL 1 ROR 2 RCL 3 RCR 4 SHL 5 SHR 6 SAL 7 SAR
-// 回数は 386 と同じく下位 5bit だけ見る。1bit ずつ回す素直な実装。
+// The count uses its low 5 bits only, as on a 386. Plain one-bit-at-a-time implementation.
 fn shift(kind: u8, v0: u32, count: u8, w: u8) -> u32 {
     let m = mask(w);
     let s = msb(w);
@@ -95,9 +95,10 @@ fn shift(kind: u8, v0: u32, count: u8, w: u8) -> u32 {
         }
     }
     set_flag(CF, cf);
-    // OF は紙の上では回数 1 のときだけ定義。実 386 は左回転 (ROL / RCL) だけ
-    // 全回数で同じ式のまま更新し、右回転とシフトは回数 1 以外では触らない
-    // (rustx86 が test386 の実機期待値から突き止めた挙動)。
+    // On paper OF is defined only for a count of 1. A real 386 updates it with the
+    // same formula at every count for left rotates (ROL / RCL) only, and leaves it
+    // untouched for right rotates and shifts unless the count is 1 (rustx86 found
+    // this from test386's real-hardware expected values).
     if count & 0x1F == 1 || kind == 0 || kind == 2 {
         match kind {
             0, 2, 4, 6 => { set_flag(OF, (v & s != 0) != cf); },

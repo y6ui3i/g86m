@@ -1,5 +1,5 @@
-; 回転とシフト 7 種 (SAL は SHL と同じ符号化なので db で直接置く) を、
-; 回数 1 / CL / 即値、8bit / 16bit、レジスタ / メモリで。
+; The 7 rotates and shifts (SAL shares SHL's encoding, so it is placed with db),
+; with a count of 1, CL and an immediate, at 8 and 16 bits, on registers and memory.
 %include "common.inc"
 %macro SH 2
     rol  %1, %2

@@ -1,4 +1,4 @@
-// M0 (d): 自前の C を extern fn で呼べるか (端末 raw モードなどの接着用)。
+// M0 (d): can our own C be called through extern fn? (Glue for things like terminal raw mode.)
 import std;
 
 extern fn g86m_isatty(fd: i32) -> i32;

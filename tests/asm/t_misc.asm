@@ -1,4 +1,4 @@
-; スタック、フラグ操作、アドレッシング、セグメント上書き、XCHG / XLAT / LEA / LES / LDS。
+; Stack, flag instructions, addressing modes, segment overrides, XCHG / XLAT / LEA / LES / LDS.
 %include "common.inc"
 start:
     HDR

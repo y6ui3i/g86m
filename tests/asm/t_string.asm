@@ -1,4 +1,4 @@
-; 文字列命令: MOVS CMPS SCAS STOS LODS、REP / REPE / REPNE、DF の両向き。
+; String instructions: MOVS CMPS SCAS STOS LODS, with REP / REPE / REPNE and both directions of DF.
 %include "common.inc"
 start:
     HDR

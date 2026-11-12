@@ -1,7 +1,7 @@
-// 機械の状態: レジスタ、フラグ、1MB の RAM、スタック。
+// Machine state: registers, flags, 1 MB of RAM, the stack.
 //
-// レジスタは必ず r16 / set_r16 / r8 / set_r8 を通して触る。M4 で 32bit に
-// 広げるとき、持ち方を変える場所をここだけにするため。
+// Registers are only touched through r16 / set_r16 / r8 / set_r8, so that widening
+// them to 32 bits in M4 changes their storage in this file alone.
 
 import std;
 import os;
@@ -15,9 +15,10 @@ let ES = 0; let CS = 1; let SS = 2; let DS = 3;
 let CF = 0x0001; let PF = 0x0004; let AF = 0x0010; let ZF = 0x0040;
 let SF = 0x0080; let TF = 0x0100; let IF = 0x0200; let DF = 0x0400; let OF = 0x0800;
 
-// BIOS の入口。IVT の全ベクタを BIOS_SEG:n で埋め、実行がそこへ来たら
-// 命令を読まずに BIOS サービスを代行する (rustx86 と同じ形)。ゲストが IVT を
-// 書き換えたベクタは、もうここを指さないので自然に代行が外れる。
+// BIOS entries. Every IVT vector starts as BIOS_SEG:n; when execution arrives there
+// the emulator performs the BIOS service instead of fetching an instruction (the same
+// scheme as rustx86). A vector the guest rewrites no longer points here, so the guest's
+// handler takes over with no special case.
 let BIOS_SEG = 0xF000;
 
 struct Cpu {
@@ -33,7 +34,7 @@ var ram: u8[RAM_SIZE] = [0; RAM_SIZE];
 var cpu: Cpu = Cpu { regs: [0; 8], segs: [0; 4], ip: 0, flags: 2, halted: false, fault: false };
 var tty: u8[>..];
 
-// ---- メモリ ----
+// ---- Memory ----
 
 fn lin(seg: u16, off: u16) -> i64 {
     return (((seg as i64) << 4) + off) & 0xFFFFF;
@@ -54,7 +55,7 @@ fn wr16(seg: u16, off: u16, v: u16) {
     wr8(seg, off + 1, (v >> 8) as! u8);
 }
 
-// 幅 (8 か 16) を引数に取る版。値は u32 で運ぶ。
+// The same, taking the width (8 or 16) as an argument. Values travel as u32.
 fn rdw(seg: u16, off: u16, w: u8) -> u32 {
     if w == 8 { return rd8(seg, off); }
     return rd16(seg, off);
@@ -64,12 +65,12 @@ fn wrw(seg: u16, off: u16, w: u8, v: u32) {
     if w == 8 { wr8(seg, off, v as! u8); } else { wr16(seg, off, v as! u16); }
 }
 
-// ---- レジスタ ----
+// ---- Registers ----
 
 fn r16(i: u8) -> u16 { return cpu.regs[i & 7]; }
 fn set_r16(i: u8, v: u16) { cpu.regs[i & 7] = v; }
 
-// 8bit レジスタの番号は AL CL DL BL AH CH DH BH の順。
+// 8-bit registers are numbered AL CL DL BL AH CH DH BH.
 fn r8(i: u8) -> u8 {
     if i & 4 == 0 { return cpu.regs[i & 3] as! u8; }
     return (cpu.regs[i & 3] >> 8) as! u8;
@@ -90,7 +91,7 @@ fn set_regw(i: u8, w: u8, v: u32) {
     if w == 8 { set_r8(i, v as! u8); } else { set_r16(i, v as! u16); }
 }
 
-// ---- フラグ ----
+// ---- Flags ----
 
 fn flag(mask: u16) -> bool { return cpu.flags & mask != 0; }
 
@@ -98,13 +99,13 @@ fn set_flag(mask: u16, on: bool) {
     if on { cpu.flags |= mask; } else { cpu.flags &= ~mask; }
 }
 
-// POPF / IRET が書けるビットだけを通す。8086 として振る舞うので、上位 4bit
-// (IOPL / NT) は持たない。PUSHF と割り込みは逆に上位 4bit を 1 にして積む
-// (pushed_flags)。ソフトはこの 4bit で CPU の世代を見分ける。
+// Lets through only the bits POPF and IRET may write. The machine behaves as an 8086,
+// so the top four bits (IOPL / NT) are not kept. PUSHF and interrupts push them as
+// ones instead (pushed_flags). Software tells CPU generations apart by these four bits.
 fn write_flags(v: u16) { cpu.flags = v & 0x0FD5 | 2; }
 fn pushed_flags() -> u16 { return cpu.flags | 0xF002; }
 
-// ---- スタック ----
+// ---- Stack ----
 
 fn push16(v: u16) {
     cpu.regs[SP] -= 2;
@@ -117,7 +118,7 @@ fn pop16() -> u16 {
     return v;
 }
 
-// ---- 割り込み ----
+// ---- Interrupts ----
 
 fn interrupt(n: u8) {
     push16(pushed_flags());
@@ -136,7 +137,7 @@ fn iret() {
     write_flags(pop16());
 }
 
-// 実装していないものに当たったら、黙って進まずに止める。
+// Stops the machine on anything unimplemented, rather than carrying on silently.
 fn stop(what: u8[:], v: i64) {
     var msg: u8[>..] = [];
     format(msg, "g86m: ", what, " ");

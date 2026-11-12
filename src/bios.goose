@@ -1,4 +1,4 @@
-// BIOS サービスの代行と I/O ポート。M1 は INT 10h のテレタイプ出力だけ。
+// BIOS services handled by the emulator, and I/O ports. M1 has INT 10h teletype output only.
 
 import state;
 
@@ -8,6 +8,6 @@ fn bios_call(n: u8) {
     stop("unimplemented BIOS interrupt", n);
 }
 
-// デバイスは M2 以降。読みは全ビット 1、書きは捨てる。
+// Devices arrive in M2. Until then a read returns all ones and a write is dropped.
 fn port_in(port: u16) -> u16 { return 0xFFFF; }
 fn port_out(port: u16, v: u16) {}

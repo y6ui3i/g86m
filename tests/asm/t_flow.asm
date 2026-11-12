@@ -1,4 +1,4 @@
-; 分岐・呼び出し・割り込み。条件分岐は、フラグの表を POPF で入れて 16 種を総当たり。
+; Branches, calls and interrupts. Each flags word in the table is loaded with POPF and all 16 conditions are tried.
 %include "common.inc"
 %macro JCC 1
     j%1  %%t
@@ -9,7 +9,7 @@ start:
     HDR
     mov  si, tab
 .next:
-    cld                         ; 表の値で DF が立つので、読む前に必ず戻す
+    cld                         ; a table value may set DF, so clear it before reading
     lodsw
     push ax
     popf
@@ -58,10 +58,10 @@ start:
     call near_fn
     push ax
     push ax
-    call near_fn2               ; 引数 2 語を RET 4 が捨てる
+    call near_fn2               ; RET 4 discards the two argument words
     call 0x0000:far_fn
     push ax
-    call 0x0000:far_fn2         ; 引数 1 語を RETF 2 が捨てる
+    call 0x0000:far_fn2         ; RETF 2 discards the one argument word
     mov  bx, near_fn
     call bx
     call [ptr_near]
