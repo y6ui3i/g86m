@@ -16,6 +16,9 @@ instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
 [docs/goose-notes.md](docs/goose-notes.md).
 
+How the first day went is written up in a blog post (in Japanese):
+[Goose で x86 エミュレータを書き直す](https://pocraft.net/?p=957).
+
 | Stage | Goal | State |
 |---|---|---|
 | M0 | Check that the core of an emulator can be written in Goose | done |
