@@ -8,12 +8,13 @@ rustx86 から引き継ぐのは言語に依らないものだけ: ブートセ�
 
 ## 現在地
 
-M0 (Goose の導入と言語適合の確認) が済んだところ。結果は [docs/experiments.md](docs/experiments.md) の E001。
+M1 (16bit リアルモードの命令一式) が済んだところ。rustx86 と命令境界ごとの状態を突き合わせ、テスト 11 本が全行一致している。
+経緯と数字は [docs/experiments.md](docs/experiments.md)、Goose の癖は [docs/goose-notes.md](docs/goose-notes.md)。
 
 | 段 | 到達点 | 状態 |
 |---|---|---|
 | M0 | Goose でエミュレータの核が書けるか確かめる | 済 |
-| M1 | 8086 リアルモードでブートセクタの Hello, World | 未着手 |
+| M1 | 16bit リアルモードの命令一式、ブートセクタの Hello, World | 済 |
 | M2 | ELKS のシェル | 未着手 |
 | M3 | FreeDOS | 未着手 |
 | M4 | 386 プロテクトモードとページング、test386 合格 | 未着手 |
@@ -35,15 +36,33 @@ Goose は **v2026.4** に固定する ([リリース](https://github.com/aardapp
 C コンパイラが 1 つ要る (`goose toolchain` で確認できる)。
 
 ```bash
-goose build -o build/m0 probe/m0.goose
+goose build -o build/g86m src/g86m.goose
 ```
 
 ```bash
-./build/m0 testdata/hello.bin
+./build/g86m testdata/hello.bin
 ```
+
+`--trace` を付けると、命令境界ごとの状態を 1 行ずつ出す。
+
+## テスト
 
 ```bash
-./build/m0 testdata/bench.bin
+tools/difftest.sh
 ```
 
-`testdata/` のブートセクタは rustx86 の `asm/` から持ってきたもの。
+命令群ごとのブートセクタ (`tests/asm/`) を NASM で組み、トレースを `tests/expected/` の期待値と比べる。
+期待値は rustx86 に足した trace16 ([tools/oracle/trace16.rs](tools/oracle/trace16.rs)) で作ったもの。
+作り直すときは `ORACLE=/path/to/trace16 tools/difftest.sh`。
+
+## 構成
+
+| ファイル | 中身 |
+|---|---|
+| [src/state.goose](src/state.goose) | レジスタ、フラグ、1MB の RAM、スタック、割り込み |
+| [src/alu.goose](src/alu.goose) | 演算とフラグ、シフトと回転 |
+| [src/exec.goose](src/exec.goose) | 命令のデコードと実行 |
+| [src/bios.goose](src/bios.goose) | BIOS サービスの代行、I/O ポート |
+| [src/g86m.goose](src/g86m.goose) | 起動とコマンドライン |
+
+`testdata/` のブートセクタは rustx86 の `asm/` から持ってきたもの。`probe/` は M0 の試し書き。
