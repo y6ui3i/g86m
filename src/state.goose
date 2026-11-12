@@ -33,6 +33,7 @@ struct Cpu {
 var ram: u8[RAM_SIZE] = [0; RAM_SIZE];
 var cpu: Cpu = Cpu { regs: [0; 8], segs: [0; 4], ip: 0, flags: 2, halted: false, fault: false };
 var tty: u8[>..];
+var stop_message: u8[>..];   // why the machine stopped, kept so it can be shown again later
 
 // ---- Memory ----
 
@@ -146,7 +147,14 @@ fn stop(what: u8[:], v: i64) {
     format_int(msg, cpu.segs[CS], 16, 4, '0');
     format(msg, ":");
     format_int(msg, cpu.ip, 16, 4, '0');
+    format(msg, "  bytes:");
+    for i: u16 in 0..12 {
+        format(msg, " ");
+        format_int(msg, rd8(cpu.segs[CS], cpu.ip + i), 16, 2, '0');
+    }
     format(msg, "\n");
+    stop_message.clear();
+    stop_message.append(msg);
     write_stderr(msg);
     cpu.halted = true;
     cpu.fault = true;

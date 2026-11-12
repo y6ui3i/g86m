@@ -9,10 +9,8 @@ its per-instruction trace is compared with g86m's.
 
 ## Status
 
-M3 is done: FreeDOS 1.4 boots from its floppy to the `A:\>` prompt and runs the shell's commands,
-and ELKS 0.9.1 (M2) boots to its shell. Both can be used by hand in the terminal console, or driven
-by a script. FreeDOS has to be started with F5 (below): its normal startup runs a program that
-uses 386 instructions, which need M4.
+M3 is done: FreeDOS 1.4 boots from its floppy to the `A:\>` prompt, and ELKS 0.9.1 (M2) boots to
+its shell. Both can be used by hand in the terminal console, or driven by a script.
 The M1 instruction tests (eleven of them) still match rustx86 line for line on the state at every
 instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
@@ -23,7 +21,7 @@ instruction boundary. The history and the numbers are in
 | M0 | Check that the core of an emulator can be written in Goose | done |
 | M1 | The 16-bit real-mode instruction set; a boot sector prints Hello, World | done |
 | M2 | The ELKS shell | done |
-| M3 | FreeDOS to the `A:\>` prompt | done (with F5; no DOS program beyond the shell has been run) |
+| M3 | FreeDOS to the `A:\>` prompt | done (the installer was declined, not run) |
 | M4 | 386 protected mode and paging; pass test386 | not started |
 | M5 | 32-bit Linux and busybox | not started |
 
@@ -64,12 +62,14 @@ columns by 25 rows, the console shows the part of the screen around the guest's 
 ./build/g86m images/fd2880.img
 ```
 
-For FreeDOS, press **F5** while the `FreeDOS kernel` banner is on the screen, and answer
-`\FREEDOS\BIN\COMMAND.COM` when it asks for the shell:
+For FreeDOS, press Enter at the language menu, then `n` and Enter when the installer asks whether
+to proceed. That leaves you at `A:\>`.
 
 ```bash
 ./build/g86m images/fd14boot.img
 ```
+
+If the machine stops on something it does not implement, the console closes and says what it was.
 
 `--wait` and `--type` script a session instead: each `--wait` runs until its text is on the screen,
 each `--type` types at the keyboard. A scripted run is not paced and skips idle time.

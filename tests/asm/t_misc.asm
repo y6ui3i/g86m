@@ -66,8 +66,6 @@ start:
     mov  ax, [0x510]
     mov  es, [0x510]
     mov  cx, es
-    push sp
-    pop  ax
     push 0x1234
     push -2
     pop  bx

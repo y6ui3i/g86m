@@ -1,5 +1,6 @@
-// Instruction execution. 16-bit real mode with 386 behaviour: PUSH SP pushes the old
-// value, shift counts use 5 bits, and a divide error points at the start of the instruction.
+// Instruction execution. 16-bit real mode. To software that asks, the machine is an 8086: the top
+// bits of FLAGS read as ones and PUSH SP pushes the decremented value. Shift counts use 5 bits
+// and a divide error points at the start of the instruction, as on later CPUs.
 
 import state;
 import alu;
@@ -375,7 +376,13 @@ fn step() {
 
         0x40..0x48 => { set_r16(op, inc(r16(op), 16) as! u16); },
         0x48..0x50 => { set_r16(op, dec(r16(op), 16) as! u16); },
-        0x50..0x58 => { push16(r16(op)); },
+        0x50..0x58 => {
+            // PUSH SP on an 8086 pushes SP as it is after the decrement; a 286 or later pushes
+            // the value from before. Programs use the difference to tell them apart, and the
+            // answer has to agree with FLAGS, where this machine also says 8086.
+            if op == 0x54 { set_r16(SP, r16(SP) - 2); wr16(cpu.segs[SS], r16(SP), r16(SP)); }
+            else { push16(r16(op)); }
+        },
         0x58..0x60 => { let v = pop16(); set_r16(op, v); },
 
         0x60 => {
