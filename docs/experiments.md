@@ -164,3 +164,77 @@ Left out of M1:
 - IN / OUT on real devices, the PIC and PIT, hardware interrupts
 - The 66h / 67h prefixes and instructions that start with 0Fh (386 and later). g86m stops on them
 - Checking what is in VRAM. For vram.bin only the register trace is compared
+
+## E004: Boot ELKS to a shell (M2, 2026-11-12)
+
+- **Hypothesis**: With a PIC, a PIT, an 8042 keyboard controller, BIOS disk services (INT 13h) and
+  hardware interrupt delivery added to the M1 core, ELKS 0.9.1 (`fd2880.img`, the image rustx86
+  boots) reaches `login:`, accepts `root` typed through the keyboard controller, and runs a command
+  at the shell prompt.
+- **What changed since last time**: M1 ran boot sectors with interrupts disabled and no devices. This
+  adds devices, a virtual clock (the PIT advances one tick per 4 instructions), interrupt delivery
+  between instructions, and a headless script (`--wait TEXT` / `--type TEXT`) that drives the
+  keyboard and reads the text screen at B8000h.
+- **Next move for each result**:
+  - Reaches the shell and `uname -a` prints an ELKS line → fix the script as a regression test,
+    open a PR, then add an interactive terminal front end
+  - Stops on an unimplemented BIOS call, port or opcode → implement it and run again (the machine
+    stops rather than guessing, so each stop names what is missing)
+  - Runs without stopping but never reaches `login:` → compare the trace with rustx86's from the
+    start of the disk boot, find the first line that differs that is not an interrupt arriving at a
+    different time, and fix that instruction
+  - The screen and rustx86's agree up to a point and then the kernel hangs waiting → suspect the
+    clock or the interrupt controller, not the CPU: check that IRQ0 is delivered and acknowledged
+- **Cut-off**: The same day. If the kernel boots but the keyboard path does not work by then, record
+  how far it got and open the PR with `login:` as the reached point.
+
+### Result
+
+2026-11-12. **ELKS reaches the shell and runs commands. Next move: open a PR, then an interactive
+terminal front end.**
+
+The script waits for `login:`, types `root`, waits for the `# ` prompt, runs `uname -a` and then
+`ls /bin | head -3; echo done-$?`. The screen at the end:
+
+```
+[0.69 secs] login: root
+# uname -a
+ELKS elks 0.9.1 commit d9ca2128 05 May 2026 15:34:43 -0700 ibmpc i8086
+# ls /bin | head -3; echo done-$?
+advent
+arp
+banner
+done-0
+#
+```
+
+- It passes on both the debug and the release build, and is now part of `tools/difftest.sh`
+  (skipped, and reported as skipped, when `images/fd2880.img` is absent)
+- The whole script takes about 0.1 s of real time on the release build
+- The M1 trace tests still match on every line after the device work
+- bench.bin: 3468–3577 ms, about 105 MIPS (about 108 before). The per-instruction timer countdown
+  and the interrupt check cost about 3%
+
+ELKS reached `login:` on the first run of the new code: the machine did not stop on an unimplemented
+BIOS call, port or opcode. So the "implement what it stops on" branch of the card was never taken,
+and the trace comparison against rustx86 for the disk boot was not needed and not done.
+
+What that leaves untested, since ELKS did not exercise it or nothing checks it:
+
+- The BIOS keyboard path (INT 16h, the INT 09h handler). ELKS installs its own keyboard handler
+- INT 10h scrolling and character writes other than teletype output
+- Disk writes (INT 13h AH=03h) reach the in-memory image only; nothing is written back to the file
+- The clock. One timer tick per 4 instructions is a made-up ratio, and idle time is skipped, so
+  nothing here says whether time passes at a believable rate for a person at the keyboard
+
+Known wrong:
+
+- The date ELKS prints is `Thu Oct 17 09:47:13 1991`. There is no CMOS clock, so ports 70h/71h read
+  as FFh and ELKS decodes that
+- `ktcp` fails to open `/dev/ne0`: the image has networking enabled and there is no NE2000. Expected
+
+Ports ELKS used that nothing answers (from `--ports`): 70h/71h (CMOS), 80h (POST delay), 2E9h/2F9h/
+3E9h/3F9h (serial probes), 240h–24Fh and 300h–31Ch and 330h (network and ATA probes), 3F2h (floppy
+controller), 110h, 510h/511h.
+
+Not done in M2: an interactive front end. The only way to use the shell so far is the script.
