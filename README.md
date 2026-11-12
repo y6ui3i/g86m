@@ -9,8 +9,8 @@ its per-instruction trace is compared with g86m's.
 
 ## Status
 
-M2 is done: ELKS 0.9.1 boots from a floppy image to its shell, and a scripted session logs in as
-root and runs commands. There is no interactive front end yet; the shell is driven by a script.
+M2 is done: ELKS 0.9.1 boots from a floppy image to its shell. It can be used by hand in the
+terminal console, or driven by a script.
 The M1 instruction tests (eleven of them) still match rustx86 line for line on the state at every
 instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
@@ -20,7 +20,7 @@ instruction boundary. The history and the numbers are in
 |---|---|---|
 | M0 | Check that the core of an emulator can be written in Goose | done |
 | M1 | The 16-bit real-mode instruction set; a boot sector prints Hello, World | done |
-| M2 | The ELKS shell | done (scripted; no interactive front end yet) |
+| M2 | The ELKS shell | done |
 | M3 | FreeDOS | not started |
 | M4 | 386 protected mode and paging; pass test386 | not started |
 | M5 | 32-bit Linux and busybox | not started |
@@ -53,8 +53,17 @@ goose build -o build/g86m src/g86m.goose
 
 With `--trace`, g86m prints the state at every instruction boundary, one line each.
 
-An image that is not 512 bytes is booted as floppy drive A. `--wait` and `--type` script the
-session: each `--wait` runs until its text is on the screen, each `--type` types at the keyboard.
+An image that is not 512 bytes is booted as floppy drive A. Started from a terminal, it opens the
+console: the guest's 80x25 text screen is drawn in the terminal, the keyboard goes to the guest,
+and guest time is paced against real time. **Ctrl-]**, **F12** or **Ctrl-\\** leaves it. In a terminal smaller than 80
+columns by 25 rows, the console shows the part of the screen around the guest's cursor.
+
+```bash
+./build/g86m images/fd2880.img
+```
+
+`--wait` and `--type` script a session instead: each `--wait` runs until its text is on the screen,
+each `--type` types at the keyboard. A scripted run is not paced and skips idle time.
 
 ```bash
 ./build/g86m --wait "login:" --type "root\n" --wait "# " --type "uname -a\n" --wait "i8086" images/fd2880.img
@@ -69,8 +78,9 @@ Disk images are not in the repository. `images/fd2880.img` is the ELKS 0.9.1 2.8
 tools/difftest.sh
 ```
 
-The ELKS session above runs as part of it when `images/fd2880.img` is there, and is reported as
-skipped when it is not.
+When `images/fd2880.img` is there, it also runs the scripted ELKS session and drives the console
+through a pseudo-terminal ([tools/console_test.py](tools/console_test.py)). Without the image both
+are reported as skipped.
 
 It assembles one boot sector per instruction group (`tests/asm/`) with NASM, runs each, and compares
 the trace with the expected one in `tests/expected/`. The expected traces come from trace16
@@ -86,7 +96,8 @@ To regenerate them, run `ORACLE=/path/to/trace16 tools/difftest.sh`.
 | [src/exec.goose](src/exec.goose) | Instruction decode and execution |
 | [src/bios.goose](src/bios.goose) | Power-on setup and the BIOS services the emulator performs: screen, disk, keyboard, time |
 | [src/dev.goose](src/dev.goose) | Interrupt controllers, timer, keyboard controller, I/O port dispatch |
-| [src/g86m.goose](src/g86m.goose) | The run loop, interrupt delivery, the session script, the command line |
+| [src/console.goose](src/console.goose), [src/console.c](src/console.c) | The terminal console: drawing the screen, translating keys; raw terminal mode in C |
+| [src/g86m.goose](src/g86m.goose) | The run loop, interrupt delivery, pacing, the session script, the command line |
 
 The boot sectors in `testdata/` are copied from rustx86's `asm/` as they are, including the Japanese
 comments in their sources. `probe/` holds the M0 probes.

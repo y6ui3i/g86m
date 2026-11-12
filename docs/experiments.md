@@ -238,3 +238,108 @@ Ports ELKS used that nothing answers (from `--ports`): 70h/71h (CMOS), 80h (POST
 controller), 110h, 510h/511h.
 
 Not done in M2: an interactive front end. The only way to use the shell so far is the script.
+
+## E005: An interactive terminal console (2026-11-12)
+
+- **Hypothesis**: A console that draws the 80x25 text screen in the host terminal with ANSI escapes,
+  feeds host keystrokes to the keyboard controller as scancodes, and paces the virtual clock against
+  real time, is enough to use the ELKS shell by hand: what is typed appears, commands run, and
+  `sleep 3` takes about 3 seconds.
+- **What changed since last time**: E004 drove the machine with a script and skipped idle time. This
+  adds C glue for raw terminal mode (`src/console.c`), a renderer that sends only the cells that
+  changed, key translation (printable keys, Enter, Backspace, Ctrl combinations, arrows and the
+  editing keys), and pacing: the machine runs one hundredth of a second of virtual time, then sleeps
+  until real time catches up. The virtual CPU speed stays at 4 instructions per timer tick, about
+  4.77 million instructions per second.
+- **Next move for each result**:
+  - A pseudo-terminal test logs in, runs a command, sees `sleep 3` take 2.5–3.5 s, and quits with
+    the terminal restored → open a PR and hand it over to be tried by hand
+  - Text is garbled or keys are lost → dump the bytes the console writes and reads in the test and
+    fix the renderer or the key translation
+  - `sleep 3` is far from 3 s → the pacing or the timer model is wrong; measure virtual against
+    real time over the same interval before changing the ratio
+  - The terminal is left in raw mode after quitting or a crash → fix the restore path before
+    anything else, since that breaks the user's shell
+- **Cut-off**: The same day. FreeDOS is out of scope here: it needs M3.
+
+### Result
+
+2026-11-12. **The console works through a pseudo-terminal. Next move: open a PR and hand it over to
+be tried by hand.**
+
+`tools/console_test.py` starts g86m on a pseudo-terminal, keeps its own 80x25 grid from the escape
+sequences g86m writes, and types as a person would:
+
+| Check | Result |
+|---|---|
+| Boots to `login:` | 0.7 s of real time, the same figure ELKS prints as `[0.69 secs]` |
+| Logs in as root, runs `uname -a` | `ibmpc i8086` on the screen, then the prompt |
+| `sleep 3; echo slept` | 3.04 s of real time (accepted range 2.5–3.5 s) |
+| Backspace | Seven Backspaces erase `wrongXX`, and the line that runs prints `backsp` |
+| Ctrl-C | `sleep 30` is still running after 1 s; Ctrl-C brings the prompt back in 0.02 s |
+| Ctrl-] | g86m exits with status 0, leaves the alternate screen, and the terminal modes are back to what they were |
+
+It is part of `tools/difftest.sh` when the image and python3 are there. The M1 trace tests and the
+ELKS script still pass on both builds. bench.bin is unchanged at about 105 MIPS.
+
+Two things went wrong on the way, both in the test and not in the console:
+
+- The first version stripped escape sequences and searched the remaining text. The console sends
+  only the cells that changed, so blanks that were already on the screen are never sent, and `# `
+  could not match. The test now applies cursor moves to a grid of its own
+- The first Ctrl-C check passed in 0.00 s: it looked at the grid before reading any new output and
+  saw the old prompt. It now waits until `sleep 30` has been running for a second before sending
+  Ctrl-C
+
+Not checked, because a pseudo-terminal test cannot see it:
+
+- How it looks: colours, the cursor, the code page 437 line-drawing characters. ELKS at a shell
+  prompt uses none of the last
+- A host terminal smaller than 80x25. Nothing handles it; lines will wrap (this was the first
+  thing to go wrong by hand; see the follow-up below)
+- Arrow keys, function keys and the editing keys. The translation is written but no test presses them
+- How it feels to type. The guest runs at about 4.77 million instructions per second, a made-up
+  figure that follows from 4 instructions per timer tick
+
+### Follow-up: first try by hand (2026-11-12)
+
+The first session by hand looked broken: prompts repeated down the screen, and the output of `ls`
+appeared as one line with a `#` written over its start. The pasted screen had 10 lines.
+
+- **Cause, as far as the evidence goes**: the terminal was shorter than 25 rows. The console
+  addressed rows up to 25, a terminal clamps a row past its last line to the last line, and so the
+  lower rows of the guest's screen were all drawn on top of each other there. This is the case the
+  result above listed as not handled. It is inferred from the 10-line paste and from the fix
+  curing a 10-row pseudo-terminal; the terminal's size at the time was not measured
+- **Fix**: the console reads the terminal's size on every redraw and draws only the part of the
+  80x25 screen that fits. Down the screen the view follows the guest's cursor and otherwise stays
+  put; sideways it returns to column 0 whenever the cursor fits. A change of size or view clears
+  and redraws
+- **Test**: `tools/console_test.py` now also scrolls the guest's screen with `ls /bin`, fails if
+  the console ever addresses a cell outside the terminal, and repeats the session on an 80x10 and
+  a 60x12 terminal. All three sizes pass
+
+The 60x12 run failed once before it passed: after a line longer than the view, the view stayed
+shifted right and hid the `# ` prompt. That is why the sideways rule differs from the vertical one.
+
+Still not checked on a real terminal: colours, the cursor, line-drawing characters, arrow and
+function keys, and resizing the window while it runs.
+
+### Follow-up: no way out (2026-11-12)
+
+The second try by hand ended with "I don't know how to get out". The quit key, Ctrl-], was
+mentioned in the README and nowhere on the screen.
+
+- The way out is now shown in three places: a line printed before the console opens (held for 1.2 s
+  when the terminal has no spare row, and left in the scrollback), the window title, and a dim line
+  below the screen when the terminal has more than 25 rows
+- Two more keys leave the console: F12 and Ctrl-\. Ctrl-] is awkward on some keyboard layouts
+- The test checks the line before the console opens, the line below the screen at 100x30, and
+  leaves by a different key in each of its three sessions
+
+Adding the line below the screen turned up a bug in the previous follow-up: the first redraw did
+not clear and set up the terminal unless the view differed from the default, so on a terminal of
+25 rows or more nothing was cleared at the start. The first redraw now always does.
+
+Whether Ctrl-] itself failed to reach g86m in that terminal, or was simply not known, is not
+established.
