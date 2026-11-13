@@ -2,11 +2,11 @@
 # Runs the instruction tests and compares the per-instruction traces with the expected ones.
 #
 #   tools/difftest.sh                 compare with tests/expected/*.trace.gz
-#   ORACLE=/path/to/trace16 tools/difftest.sh
-#                                     regenerate the expected traces with rustx86's trace16 first
+#   ORACLE=/path/to/trace32 tools/difftest.sh
+#                                     regenerate the expected traces with rustx86's trace32 first
 #
-# To build trace16, put tools/oracle/trace16.rs in rustx86's core/examples/ and run
-#   cargo build --release -p rustx86-core --example trace16
+# To build trace32, put tools/oracle/trace32.rs in rustx86's core/examples/ and run
+#   cargo build --release -p rustx86-core --example trace32
 # GOOSE names the compiler when it is not on PATH.
 set -u
 cd "$(dirname "$0")/.."
@@ -17,13 +17,13 @@ mkdir -p build tests/expected
 "$GOOSE" build -o build/g86m src/g86m.goose >/dev/null || exit 2
 
 fail=0
-for asm in tests/asm/t_*.asm tests/asm/s_*.asm; do
+for asm in tests/asm/t_*.asm tests/asm/u_*.asm tests/asm/s_*.asm; do
     name=$(basename "$asm" .asm)
     nasm -w-other -I tests/asm/ -f bin -o "build/$name.bin" "$asm" || exit 2
 done
 cp testdata/hello.bin testdata/interrupt.bin testdata/vram.bin build/
 
-for bin in build/t_*.bin build/hello.bin build/interrupt.bin build/vram.bin; do
+for bin in build/t_*.bin build/u_*.bin build/hello.bin build/interrupt.bin build/vram.bin; do
     name=$(basename "$bin" .bin)
     exp="tests/expected/$name.trace.gz"
     if [ -n "${ORACLE:-}" ]; then

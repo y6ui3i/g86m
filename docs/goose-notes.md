@@ -52,11 +52,18 @@ truncates toward zero. The remainder of x86 IDIV has the sign of the dividend, s
 
 # Found in rustx86
 
-Behaviour of rustx86 (8086 profile) that turned up while comparing g86m's tests with it. g86m does
-not follow it in these cases.
+Behaviour of rustx86 that turned up while comparing g86m's tests with it. g86m does not follow it in
+these cases. The first two were found on its 8086 profile, the last two on its 32-bit profile.
 
 - **IDIV of -32768 by -1 panics.** `attempt to divide with overflow` at `core/src/cpu/group.rs:79`.
   Reproduced with the 8-bit form (`AX=8000h`, divisor `FFh`). The specified behaviour is a divide
   error (#DE). `tests/asm/s_selfcheck.asm` checks what g86m does
 - **SALC (D6) leaves AL unchanged.** The specified behaviour is `AL = CF ? FFh : 00h`. It is an
   undocumented instruction, so the practical effect is small
+- **BT, BTS, BTR and BTC on memory do not wrap an immediate bit offset.** `bts dword [m], 40`
+  should act on bit 8 of the dword (the offset is taken modulo the operand size); rustx86 acts on
+  bit 0 of the byte at `m+5`. With a 16-bit register offset it also treats the offset as unsigned,
+  where the manual has it signed
+- **IRETD in real mode pops 16-bit values.** The operand-size prefix is ignored on that path, so
+  three words are popped instead of three dwords
+

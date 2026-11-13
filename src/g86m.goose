@@ -9,7 +9,7 @@
 //
 //   --max N        stop after N instructions of virtual time
 //   --trace        print the state at every instruction boundary, one line each, in the same
-//                  format as rustx86's trace16 so the two can be diffed
+//                  format as rustx86's trace32 so the two can be diffed
 //   --wait TEXT    script step: run until TEXT is on the text screen
 //   --type TEXT    script step: type TEXT at the keyboard (\n is Enter; \kNN presses the key
 //                  with scancode NN in hex, so \k3F is F5)
@@ -39,18 +39,28 @@ fn hex4(v: u16) {
     trace_buf.push(HEX[v & 15]);
 }
 
-fn field(name: u8[:], v: u16) {
+fn hex8(v: u32) {
+    hex4((v >> 16) as! u16);
+    hex4(v as! u16);
+}
+
+fn field(name: u8[:], v: u32) {
     trace_buf.append(name);
-    hex4(v);
+    hex8(v);
+}
+
+fn seg_field(name: u8[:], s: i64) {
+    trace_buf.append(name);
+    hex4(cpu.segs[s]);
 }
 
 fn trace_line() {
     hex4(cpu.segs[CS]);
     trace_buf.push(':');
-    hex4(cpu.ip);
-    field(" AX=", r16(AX)); field(" CX=", r16(CX)); field(" DX=", r16(DX)); field(" BX=", r16(BX));
-    field(" SP=", r16(SP)); field(" BP=", r16(BP)); field(" SI=", r16(SI)); field(" DI=", r16(DI));
-    field(" ES=", cpu.segs[ES]); field(" SS=", cpu.segs[SS]); field(" DS=", cpu.segs[DS]);
+    hex8(cpu.ip);
+    field(" EAX=", r32(AX)); field(" ECX=", r32(CX)); field(" EDX=", r32(DX)); field(" EBX=", r32(BX));
+    field(" ESP=", r32(SP)); field(" EBP=", r32(BP)); field(" ESI=", r32(SI)); field(" EDI=", r32(DI));
+    seg_field(" ES=", ES); seg_field(" SS=", SS); seg_field(" DS=", DS); seg_field(" FS=", FS); seg_field(" GS=", GS);
     field(" F=", cpu.flags);
     trace_buf.push('\n');
     if trace_buf.len > 60000 { write_stdout(trace_buf); trace_buf.clear(); }
