@@ -568,3 +568,34 @@ What was not done:
   stops. LGDT and LIDT only store their operand
 - **Instructions in the two-byte range that no test reaches**: MOV to and from debug registers, CLTS,
   INS / OUTS
+
+## E009: Run test386 (M4b, 2026-11-13)
+
+test386.asm is a ROM that replaces the BIOS, tests a 386 instruction by instruction, reports
+progress as codes on a diagnostic port, and halts at the first failure. Its last stage prints
+44,926 lines of results, to be compared with a reference taken from real hardware.
+
+Reading its README changed the plan: it enters protected mode with paging already on (code 08h),
+and goes on to ring 3, virtual-8086 mode, page faults and task switches. So "protected mode" and
+"paging" cannot be separate steps for this test; M4b and M4c are one piece of work, measured by how
+far the codes get.
+
+- **Hypothesis**: (1) With a ROM boot mode and the diagnostic and serial ports, the real-mode stages
+  (codes 00h–06h) pass on the M4a build as it is. (2) With protected mode, paging, faults with error
+  codes, privilege changes, virtual-8086 mode and task switching added, the ROM reaches code FFh and
+  its serial output matches the reference on every line.
+- **What changed since last time**: M4a stopped the machine when CR0.PE was set. The ROM is built
+  from barotto/test386.asm at commit cfd052d with `COM_PORT equ 1`, as rustx86's fetch script
+  does. It is not in the repository (GPL-3.0).
+- **Next move for each result**:
+  - A real-mode stage fails → that is an M4a bug the traces did not catch. Find the instruction
+    from the listing file and the last trace lines, fix it, add the case to a trace test
+  - Stops at 08h on "protected mode is not implemented" → the expected starting point. Implement
+    in the order the ROM needs: descriptor loading and CR0.PE, then paging, then interrupts through
+    the IDT, then privilege changes, then virtual-8086 mode
+  - Halts at a later code → read that stage's source, compare the trace with rustx86's from the
+    same ROM, fix the first difference
+  - Reaches FFh but the output differs from the reference → fix by the first differing line; the
+    reference masks undefined flags, so every difference is a real one
+- **Cut-off**: Each code reached is recorded. If the day ends before FFh, the PR says which code
+  it stops at and why.

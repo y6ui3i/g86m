@@ -528,7 +528,7 @@ fn two_byte() {
 
 fn step() {
     // At a BIOS entry: perform the service instead of fetching an instruction, then IRET.
-    if cpu.segs[CS] == BIOS_SEG && cpu.ip < 256 {
+    if bios_on && cpu.segs[CS] == BIOS_SEG && cpu.ip < 256 {
         bios_call(cpu.ip as! u8);
         iret();
         if bios_idle {

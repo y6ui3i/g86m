@@ -248,6 +248,11 @@ var crtc_index: u8 = 0;
 var crtc: u8[32] = [0; 32];
 var retrace: u8 = 0;
 
+// ---- Diagnostic port and serial port (used by the test386 ROM) ----
+
+var post_trail: u8[>..];     // every code written to the diagnostic port, in order
+var com_out: u8[>..];        // every byte written to COM1's data register
+
 // ---- Port dispatch ----
 
 // Ports nothing answers: counted per port so a run can report what the guest probed.
@@ -270,6 +275,7 @@ fn port_in8(port: u16) -> u8 {
         0x3D4 => { return crtc_index; },
         0x3D5 => { return crtc[crtc_index & 31]; },
         0x3DA => { retrace ^= 0x09; return retrace; },
+        0x3FD => { return 0x60; },                       // COM1 line status: ready to send
         _ => { note_unknown(port); return 0xFF; },
     }
 }
@@ -287,6 +293,9 @@ fn port_out8(port: u16, v: u8) {
         0x64 => { kbd_write_command(v); },
         0x3D4 => { crtc_index = v; },
         0x3D5 => { crtc[crtc_index & 31] = v; },
+        0x190 => { post_trail.push(v); },
+        0x3F8 => { com_out.push(v); },
+        0x3F9..0x3FD => {},                              // COM1 setup
         _ => { note_unknown(port); },
     }
 }

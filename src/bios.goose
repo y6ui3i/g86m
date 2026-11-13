@@ -5,6 +5,9 @@ import std;
 import state;
 import dev;
 
+// False when a ROM image runs in place of the BIOS: then nothing is intercepted.
+var bios_on = true;
+
 // The boot disk: a floppy image, drive 0.
 var disk: u8[>..];
 var disk_cyls: u16 = 80;
