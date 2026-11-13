@@ -7,6 +7,8 @@
 // state.goose). step wraps it: it restores the state the instruction started from and delivers
 // the fault.
 
+import std;
+import os;
 import state;
 import alu;
 import prot;
@@ -40,7 +42,7 @@ fn fetch8() -> u8 {
         code_phys = translate(a, false, cpu.cpl == 3) & 0xFFFFF000;
         code_page = a >> 12;
     }
-    let b = ram[(code_phys | a & 0xFFF) & 0xFFFFF];
+    let b = mem8(code_phys | a & 0xFFF);
     cpu.ip += 1;
     if !code32() { cpu.ip &= 0xFFFF; }
     return b;
@@ -1075,6 +1077,31 @@ fn exec_one() -> bool {
     return true;
 }
 
+// With --faults, every fault is reported on standard error: its vector and error code, where it
+// happened and the bytes there. Page faults are left out unless they come from the kernel
+// itself going wrong (they are how demand paging works).
+var log_faults = false;
+var faults_logged = 0;
+
+fn note_fault(vec: u8, has_err: bool, err: u32) {
+    if vec == 14 || faults_logged >= 40 { return; }
+    faults_logged++;
+    var msg: u8[>..] = [];
+    format(msg, "g86m: fault ", vec);
+    if has_err { format(msg, " error "); format_int(msg, err, 16, 4, '0'); }
+    format(msg, " at ");
+    format_int(msg, cpu.segs[CS], 16, 4, '0');
+    format(msg, ":");
+    format_int(msg, cpu.ip, 16, 8, '0');
+    format(msg, "  bytes:");
+    for i: u32 in 0..10 {
+        format(msg, " ");
+        format_int(msg, mem8(translate_quiet(cpu.base[CS] + cpu.ip + i)), 16, 2, '0');
+    }
+    format(msg, "\n");
+    write_stderr(msg);
+}
+
 // Runs one instruction; if it faults, puts the state back and delivers the fault. A fault while
 // delivering a fault becomes a double fault, and a fault while delivering that stops the machine
 // (a real one would reset).
@@ -1087,6 +1114,7 @@ fn step() {
     for attempt in 3 {
         cpu = saved;
         flush_tlb();                     // the privilege level may have gone back with the rest
+        if log_faults { note_fault(vec, has_err, err); }
         if attempt == 2 { stop("triple fault; the last vector was", vec); return; }
         pending = true;
         pending_vec = vec;

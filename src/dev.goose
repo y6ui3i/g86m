@@ -1,6 +1,8 @@
 // Devices: the interrupt controllers (8259), the timer (8254), the keyboard controller (8042),
 // the CRT controller's cursor registers, and the I/O port dispatch that reaches them.
 
+import std;
+import os;
 import state;
 
 // ---- Interrupt controllers (8259 pair) ----
@@ -251,8 +253,101 @@ var retrace: u8 = 0;
 // ---- Diagnostic port and serial port (used by the test386 ROM) ----
 
 var post_trail: u8[>..];     // every code written to the diagnostic port, in order
-var com_out: u8[>..];        // every byte sent through COM1
-var com_lcr: u8 = 0;         // COM1's line control register
+
+// COM1, a 16550 without its FIFOs. What the guest sends is kept in com_out and, when com_live is
+// set, also written to our standard output as it arrives. What we want the guest to receive
+// waits in a queue. The port interrupts on IRQ 4, for a received byte and for "ready to send".
+let COM_QUEUE = 1024;
+
+var com_out: u8[>..];
+var com_line: u8[>..];       // output not yet written to standard output
+var com_live = false;
+var com_rx: u8[COM_QUEUE] = [0; COM_QUEUE];
+var com_rx_head = 0;
+var com_rx_tail = 0;
+var com_ier: u8 = 0;         // interrupt enable register
+var com_lcr: u8 = 0;         // line control register; bit 7 opens the divisor latch
+var com_mcr: u8 = 0;         // modem control register; bit 4 is loopback
+var com_scr: u8 = 0;         // scratch register
+var com_dll: u8 = 1;         // baud rate divisor
+var com_dlm: u8 = 0;
+var com_thre = false;        // "ready to send" has not been reported to the guest yet
+
+fn com_has_input() -> bool { return com_rx_head != com_rx_tail; }
+
+fn com_update() {
+    if (com_ier & 1 != 0 && com_has_input()) || (com_ier & 2 != 0 && com_thre) { raise_irq(4); }
+}
+
+// Queues a byte for the guest to receive.
+fn com_receive(v: u8) {
+    let next = (com_rx_tail + 1) % COM_QUEUE;
+    if next == com_rx_head { return; }
+    com_rx[com_rx_tail] = v;
+    com_rx_tail = next;
+    com_update();
+}
+
+fn com_flush() {
+    if com_line.len > 0 { write_stdout(com_line); flush_stdout(); com_line.clear(); }
+}
+
+fn com_read(reg: u16) -> u8 {
+    let dlab = com_lcr & 0x80 != 0;
+    match reg {
+        0 => {
+            if dlab { return com_dll; }
+            if !com_has_input() { return 0; }
+            let v = com_rx[com_rx_head];
+            com_rx_head = (com_rx_head + 1) % COM_QUEUE;
+            return v;
+        },
+        1 => { return if dlab { com_dlm } else { com_ier }; },
+        2 => {
+            // Interrupt identification: the highest-priority pending cause, or 1 for none.
+            if com_ier & 1 != 0 && com_has_input() { return 0x04; }
+            if com_ier & 2 != 0 && com_thre { com_thre = false; return 0x02; }
+            return 0x01;
+        },
+        3 => { return com_lcr; },
+        4 => { return com_mcr; },
+        5 => { return if com_has_input() { 0x61 } else { 0x60 }; },      // sender idle; data ready
+        6 => {
+            // Modem status. In loopback the four inputs are wired to the four outputs.
+            if com_mcr & 0x10 != 0 { return (com_mcr & 2) << 3 | (com_mcr & 1) << 5 | (com_mcr & 0x0C) << 4; }
+            return 0xB0;
+        },
+        _ => { return com_scr; },
+    }
+}
+
+fn com_write(reg: u16, v: u8) {
+    let dlab = com_lcr & 0x80 != 0;
+    match reg {
+        0 => {
+            if dlab { com_dll = v; return; }
+            com_out.push(v);
+            if com_live {
+                com_line.push(v);
+                if v == '\n' || com_line.len >= 256 { com_flush(); }
+            }
+            com_thre = true;
+            com_update();
+        },
+        1 => {
+            if dlab { com_dlm = v; return; }
+            // Enabling the "ready to send" interrupt while the sender is idle raises it at once.
+            if v & 2 != 0 && com_ier & 2 == 0 { com_thre = true; }
+            com_ier = v & 0x0F;
+            com_update();
+        },
+        2 => {},                                 // FIFO control: no FIFOs
+        3 => { com_lcr = v; },
+        4 => { com_mcr = v; },
+        7 => { com_scr = v; },
+        _ => {},
+    }
+}
 
 // ---- Port dispatch ----
 
@@ -274,7 +369,7 @@ fn port_in8(port: u16) -> u8 {
         0x3D4 => { return crtc_index; },
         0x3D5 => { return crtc[crtc_index & 31]; },
         0x3DA => { retrace ^= 0x09; return retrace; },
-        0x3FD => { return 0x60; },                       // COM1 line status: ready to send
+        0x3F8..0x400 => { return com_read(port - 0x3F8); },
         _ => { note_unknown(port); return 0xFF; },
     }
 }
@@ -293,11 +388,7 @@ fn port_out8(port: u16, v: u8) {
         0x3D4 => { crtc_index = v; },
         0x3D5 => { crtc[crtc_index & 31] = v; },
         0x190 => { post_trail.push(v); },
-        // With the divisor latch open (bit 7 of the line control register), the data register
-        // holds the low byte of the baud rate divisor, not a byte to send.
-        0x3F8 => { if com_lcr & 0x80 == 0 { com_out.push(v); } },
-        0x3FB => { com_lcr = v; },
-        0x3F9, 0x3FA, 0x3FC => {},                       // the rest of COM1's setup
+        0x3F8..0x400 => { com_write(port - 0x3F8, v); },
         _ => { note_unknown(port); },
     }
 }

@@ -29,7 +29,7 @@ How the first day went is written up in a blog post (in Japanese):
 | M2 | The ELKS shell | done |
 | M3 | FreeDOS to the `A:\>` prompt | done (the installer was declined, not run) |
 | M4 | 386 protected mode and paging; pass test386 | done (no task switching) |
-| M5 | 32-bit Linux and busybox | not started |
+| M5 | 32-bit Linux and busybox | in progress: the kernel loads and runs until its first 486 instruction |
 
 ## Technology choices
 
@@ -85,6 +85,13 @@ each `--type` types at the keyboard. A scripted run is not paced and skips idle 
 ./build/g86m --wait "login:" --type "root\n" --wait "# " --type "uname -a\n" --wait "i8086" images/fd2880.img
 ```
 
+A Linux kernel image is loaded and entered directly; its serial console goes to standard output.
+It does not boot yet: the kernel stops at the first instruction a 386 does not have.
+
+```bash
+./build/g86m --faults --initrd images/initramfs-mini images/vmlinuz-lts
+```
+
 To run test386, build its ROM with `COM_PORT equ 1` in `src/configuration.asm` and put `test386.bin`
 and `test386-EE-reference.txt` in `images/`:
 
@@ -121,6 +128,7 @@ To regenerate them, run `ORACLE=/path/to/trace32 tools/difftest.sh`.
 | [src/exec.goose](src/exec.goose) | Instruction decode and execution |
 | [src/bios.goose](src/bios.goose) | Power-on setup and the BIOS services the emulator performs: screen, disk, keyboard, time |
 | [src/dev.goose](src/dev.goose) | Interrupt controllers, timer, keyboard controller, I/O port dispatch |
+| [src/linux.goose](src/linux.goose) | Loading a Linux kernel and entering it directly (zero page, memory map, initramfs) |
 | [src/console.goose](src/console.goose), [src/console.c](src/console.c) | The terminal console: drawing the screen, translating keys; raw terminal mode in C |
 | [src/g86m.goose](src/g86m.goose) | The run loop, interrupt delivery, pacing, the session script, the command line |
 | [src/big.goose](src/big.goose) | The large arrays (RAM and three others), in a file of their own so they come last in memory |
