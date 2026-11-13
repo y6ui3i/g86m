@@ -2,7 +2,9 @@
 org 0x7C00
 bits 16
 ; The 16-bit tests are held to 186 instructions; a test that defines CPU386 first may use the 386's.
-%ifdef CPU386
+%ifdef CPU686
+cpu 686
+%elifdef CPU386
 cpu 386
 %else
 cpu 186

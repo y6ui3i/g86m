@@ -29,7 +29,7 @@ How the first day went is written up in a blog post (in Japanese):
 | M2 | The ELKS shell | done |
 | M3 | FreeDOS to the `A:\>` prompt | done (the installer was declined, not run) |
 | M4 | 386 protected mode and paging; pass test386 | done (no task switching) |
-| M5 | 32-bit Linux and busybox | in progress: the kernel loads and runs until its first 486 instruction |
+| M5 | 32-bit Linux and busybox | in progress: the kernel prints its boot log and stops for want of an FPU |
 
 ## Technology choices
 
@@ -86,10 +86,11 @@ each `--type` types at the keyboard. A scripted run is not paced and skips idle 
 ```
 
 A Linux kernel image is loaded and entered directly; its serial console goes to standard output.
-It does not boot yet: the kernel stops at the first instruction a 386 does not have.
+It does not boot yet: the kernel prints about a hundred lines of its log and then gives up
+because there is no FPU.
 
 ```bash
-./build/g86m --faults --initrd images/initramfs-mini images/vmlinuz-lts
+./build/g86m --max 1500000000 --initrd images/initramfs-mini images/vmlinuz-lts
 ```
 
 To run test386, build its ROM with `COM_PORT equ 1` in `src/configuration.asm` and put `test386.bin`

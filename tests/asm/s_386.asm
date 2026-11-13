@@ -4,6 +4,8 @@
 ;     operand size (40 means bit 8 of the dword). rustx86 reaches past the operand instead
 ;   - BTS with a 16-bit register bit offset: the offset is signed (-1 is bit 15 of the word
 ;     before the operand). rustx86 treats it as unsigned
+;   - CPUID is an invalid opcode (vector 6): the 16-bit machine's CPU is a 386, which has none.
+;     rustx86's 32-bit profile has it
 ;   - IRETD in real mode pops three 32-bit values. rustx86 ignores the operand-size prefix there
 ;     and pops three 16-bit ones
 %define CPU386
@@ -27,6 +29,12 @@ start:
     jne  .bad
     cmp  dword [mem], 0
     jne  .bad
+    mov  word [6*4], ud
+    mov  word [6*4+2], 0
+    xor  bx, bx
+    db   0x0F, 0xA2              ; CPUID
+    cmp  bx, 1
+    jne  .bad
     pushfd
     push dword 0
     push dword .back
@@ -47,6 +55,13 @@ put:
     mov  ah, 0x0E
     int  0x10
     ret
+ud:                             ; skip the two-byte instruction that faulted
+    inc  bx
+    push bp
+    mov  bp, sp
+    add  word [bp+2], 2
+    pop  bp
+    iret
 pad: dd 0
 mem: dd 0, 0
     TAIL

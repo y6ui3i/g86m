@@ -386,7 +386,7 @@ fn do_iret(w: u8) {
         cpu.ip = ip;
         // Virtual-8086 code cannot change IOPL; nothing here can set VM.
         let m: u32 = if v86() { 0x4FD5 } else { 0x7FD5 };
-        write_flags(fl, if w == 32 { m | RF } else { m });
+        write_flags(fl, if w == 32 { m | RF | AC | ID } else { m });
         return;
     }
     if flag(NT) { stop("IRET with NT set (task return) is not implemented", 0); return; }
@@ -420,7 +420,7 @@ fn do_iret(w: u8) {
     check_code(sel, hi, rpl, 0);
     // IF changes only if the level may do I/O; IOPL only at level 0.
     var m: u32 = 0x4DD5;
-    if w == 32 { m |= RF; }
+    if w == 32 { m |= RF | AC | ID; }
     if cpu.cpl <= iopl() { m |= IF; }
     if cpu.cpl == 0 { m |= IOPL; }
     if rpl == cpu.cpl {
