@@ -9,10 +9,11 @@ its per-instruction trace is compared with g86m's.
 
 ## Status
 
-M4 is under way. Its first part is done: g86m is now a 386 in real mode, with 32-bit registers,
-the operand- and address-size prefixes, 32-bit addressing and the 386's new instructions. Protected
-mode and paging are next. FreeDOS 1.4 (M3) and ELKS 0.9.1 (M2) boot and can be used by hand in the
-terminal console, or driven by a script.
+M4 is done: g86m is a 386 with protected mode, paging and virtual-8086 mode, and it passes
+[test386](https://github.com/barotto/test386.asm): the ROM reaches its final diagnostic code and
+its 44,926 lines of output match the reference taken from real hardware byte for byte. Task
+switching is not implemented. FreeDOS 1.4 (M3) and ELKS 0.9.1 (M2) boot and can be used by hand in
+the terminal console, or driven by a script.
 Seventeen instruction tests match rustx86 line for line on the full 32-bit state at every
 instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
@@ -27,7 +28,7 @@ How the first day went is written up in a blog post (in Japanese):
 | M1 | The 16-bit real-mode instruction set; a boot sector prints Hello, World | done |
 | M2 | The ELKS shell | done |
 | M3 | FreeDOS to the `A:\>` prompt | done (the installer was declined, not run) |
-| M4 | 386 protected mode and paging; pass test386 | in progress: the 386 instruction set in real mode is done |
+| M4 | 386 protected mode and paging; pass test386 | done (no task switching) |
 | M5 | 32-bit Linux and busybox | not started |
 
 ## Technology choices
@@ -58,7 +59,8 @@ goose build -o build/g86m src/g86m.goose
 
 With `--trace`, g86m prints the state at every instruction boundary, one line each.
 
-An image that is not 512 bytes is booted as floppy drive A. Started from a terminal, it opens the
+A 64 KB or 128 KB image is a ROM that replaces the BIOS; `--com FILE` saves what it sends to the
+serial port. Any other image that is not 512 bytes is booted as floppy drive A. Started from a terminal, it opens the
 console: the guest's 80x25 text screen is drawn in the terminal, the keyboard goes to the guest,
 and guest time is paced against real time. **Ctrl-]**, **F12** or **Ctrl-\\** leaves it. In a terminal smaller than 80
 columns by 25 rows, the console shows the part of the screen around the guest's cursor.
@@ -83,7 +85,14 @@ each `--type` types at the keyboard. A scripted run is not paced and skips idle 
 ./build/g86m --wait "login:" --type "root\n" --wait "# " --type "uname -a\n" --wait "i8086" images/fd2880.img
 ```
 
-Disk images are not in the repository. `images/fd2880.img` is the ELKS 0.9.1 2.88 MB floppy
+To run test386, build its ROM with `COM_PORT equ 1` in `src/configuration.asm` and put `test386.bin`
+and `test386-EE-reference.txt` in `images/`:
+
+```bash
+./build/g86m --com build/test386.out images/test386.bin
+```
+
+Disk images and the test386 ROM are not in the repository. `images/fd2880.img` is the ELKS 0.9.1 2.88 MB floppy
 (`fd2880-minix.img` from the [ELKS releases](https://github.com/ghaerr/elks/releases/tag/v0.9.1)),
 and `images/fd14boot.img` is the FreeDOS 1.4 boot floppy from [freedos.org](https://www.freedos.org/).
 
@@ -93,8 +102,8 @@ and `images/fd14boot.img` is the FreeDOS 1.4 boot floppy from [freedos.org](http
 tools/difftest.sh
 ```
 
-With the images in `images/`, it also runs scripted ELKS and FreeDOS sessions and drives the
-console through a pseudo-terminal ([tools/console_test.py](tools/console_test.py)). A session whose
+With the images in `images/`, it also runs test386, scripted ELKS and FreeDOS sessions, and drives
+the console through a pseudo-terminal ([tools/console_test.py](tools/console_test.py)). A session whose
 image is missing is reported as skipped.
 
 It assembles one boot sector per instruction group (`tests/asm/`) with NASM, runs each, and compares
@@ -106,8 +115,9 @@ To regenerate them, run `ORACLE=/path/to/trace32 tools/difftest.sh`.
 
 | File | Contents |
 |---|---|
-| [src/state.goose](src/state.goose) | Registers, flags, 1 MB of RAM, the stack, interrupts |
+| [src/state.goose](src/state.goose) | Registers, flags, segment caches, control registers, 1 MB of RAM, paging, checked memory access, faults |
 | [src/alu.goose](src/alu.goose) | Arithmetic and flags, shifts and rotates |
+| [src/prot.goose](src/prot.goose) | Descriptors, segment loading, far transfers, interrupt and fault delivery, virtual-8086 mode |
 | [src/exec.goose](src/exec.goose) | Instruction decode and execution |
 | [src/bios.goose](src/bios.goose) | Power-on setup and the BIOS services the emulator performs: screen, disk, keyboard, time |
 | [src/dev.goose](src/dev.goose) | Interrupt controllers, timer, keyboard controller, I/O port dispatch |

@@ -2,7 +2,9 @@
 //
 //   g86m [options] image
 //
-// A 512-byte image is a boot sector; anything else is a floppy image booted as drive A.
+// A 512-byte image is a boot sector. A 64 KB or 128 KB image is a ROM that replaces the BIOS: it
+// is placed at the top of the first megabyte and started at the reset vector, F000:FFF0. Anything
+// else is a floppy image booted as drive A.
 // A floppy image started from a terminal, with no script and no trace, opens the interactive
 // console: the guest's text screen is drawn in the terminal and the keyboard goes to the guest.
 // Ctrl-] or F12 leaves it.
@@ -18,6 +20,7 @@
 //                  each BIOS service was called
 //   --headless     never open the interactive console
 //   --dump FILE    write the 1 MB of guest memory to FILE when the run ends
+//   --com FILE     write what the guest sent to COM1 to FILE when the run ends
 //
 // Script steps run in the order given, and the run ends when the last one is done.
 
@@ -163,10 +166,6 @@ fn run_until(limit: i64) -> i64 {
                 continue;
             }
         }
-        if irq_line && flag(IF) && !shadow {
-            cpu.halted = false;
-            interrupt(pic_ack());
-        }
         step();
         vtime++;
         if timer_on {
@@ -218,6 +217,7 @@ fn main() {
     var show_ports = false;
     var headless = false;
     var dump_arg = 0;
+    var com_arg = 0;
     var max = 20000000000;
     var path: const u8[:] = "";
     var i = 1;
@@ -227,6 +227,7 @@ fn main() {
         else if a[i] == "--ports" { show_ports = true; }
         else if a[i] == "--headless" { headless = true; }
         else if a[i] == "--dump" && i + 1 < a.len { i++; dump_arg = i; }
+        else if a[i] == "--com" && i + 1 < a.len { i++; com_arg = i; }
         else if a[i] == "--max" && i + 1 < a.len {
             i++;
             let n, ok = parse_int(a[i]);
@@ -245,24 +246,35 @@ fn main() {
 
     var img: u8[>..] = [];
     guard read_file(path, img) else { write_stderr("g86m: cannot read image\n"); exit(2); }
-    guard img.len >= 512 && img[510] == 0x55 && img[511] == 0xAA else {
-        write_stderr("g86m: the image does not start with a boot sector (55AA signature)\n");
-        exit(2);
-    }
-
-    power_on();
-    for k in 512 { ram[0x7C00 + k] = img[k]; }
-    cpu.ip = 0x7C00;
-    if img.len == 512 {
-        set_r16(DX, 0x0080);             // a bare boot sector: DL = 80h, as rustx86 starts it
+    let rom = img.len == 65536 || img.len == 131072;
+    if rom {
+        // The ROM ends at the top of the first megabyte. A CPU starts at the reset vector.
+        for b, k in img { ram[RAM_SIZE - img.len + k] = b; }
+        bios_on = false;
+        // No BIOS has set up the interrupt controller or the timer: nothing interrupts the ROM.
+        pic[0].imr = 0xFF;
+        timer_on = false;
+        set_seg(CS, 0xF000);
+        cpu.ip = 0xFFF0;
     } else {
-        disk.append(img);
-        guard disk_geometry() else { write_stderr("g86m: the image is not a floppy size\n"); exit(2); }
-        set_r16(DX, 0x0000);             // DL = drive A
+        guard img.len >= 512 && img[510] == 0x55 && img[511] == 0xAA else {
+            write_stderr("g86m: the image does not start with a boot sector (55AA signature)\n");
+            exit(2);
+        }
+        power_on();
+        for k in 512 { ram[0x7C00 + k] = img[k]; }
+        cpu.ip = 0x7C00;
+        if img.len == 512 {
+            set_r16(DX, 0x0080);             // a bare boot sector: DL = 80h, as rustx86 starts it
+        } else {
+            disk.append(img);
+            guard disk_geometry() else { write_stderr("g86m: the image is not a floppy size\n"); exit(2); }
+            set_r16(DX, 0x0000);             // DL = drive A
+        }
     }
 
     scripted = step_kind.len > 0;
-    var interactive = !trace && !scripted && !headless && img.len != 512 && con_is_tty() != 0;
+    var interactive = !trace && !scripted && !headless && img.len != 512 && !rom && con_is_tty() != 0;
     if interactive {
         // Said on the ordinary screen first, so it is also there to scroll back to afterwards.
         write_stdout("g86m: Ctrl-] or F12 to quit\r\n");
@@ -296,9 +308,17 @@ fn main() {
     format(stats, ":");
     format_int(stats, cpu.ip, 16, 4, '0');
     if scripted { format(stats, " script ", step_pos, "/", step_kind.len); }
-    if !scripted && !interactive { format(stats, " console \"", tty, "\""); }
+    if !scripted && !interactive && !rom { format(stats, " console \"", tty, "\""); }
+    if rom {
+        format(stats, " post");
+        for code in post_trail { format(stats, " "); format_int(stats, code, 16, 2, '0'); }
+        format(stats, " com ", com_out.len, " bytes");
+    }
     format(stats, "\n");
     write_stderr(stats);
+    if com_arg > 0 {
+        if !write_file(a[com_arg], com_out) { write_stderr("g86m: cannot write the serial output\n"); }
+    }
     if dump_arg > 0 {
         if !write_file(a[dump_arg], ram[..]) { write_stderr("g86m: cannot write the memory dump\n"); }
     }
