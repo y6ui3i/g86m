@@ -162,7 +162,6 @@ let CP437: u16[128] = [
 
 let ESC = 0x1B;
 
-var shown: u8[4000] = [0xFF; 4000];      // what the terminal currently shows; FFh forces a redraw
 var shown_cursor = -1;
 var out: u8[>..];
 

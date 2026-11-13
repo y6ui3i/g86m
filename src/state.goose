@@ -51,7 +51,6 @@ struct Cpu {
     fault: bool,
 }
 
-var ram: u8[RAM_SIZE] = [0; RAM_SIZE];
 var cpu: Cpu = Cpu { regs: [0; 8], segs: [0; 6], base: [0; 6], limit: [0xFFFF; 6],
                      attr: [0x10093, 0x1009B, 0x10093, 0x10093, 0x10093, 0x10093],
                      ip: 0, flags: 2, cpl: 0, halted: false, fault: false };
@@ -75,6 +74,33 @@ var tr_sel: u16 = 0;
 var tr_base: u32 = 0;
 var tr_limit: u32 = 0;
 var tr_32 = true;            // the task segment is a 32-bit one
+
+// ---- Cached translations ----
+//
+// Three one-entry caches of the last page translated: for instruction bytes, for data reads and
+// for data writes. Each holds a linear page number and the physical address behind it; FFFFFFFFh
+// means empty. A real 386 keeps such translations too (its TLB), with the same consequence: a
+// change to the page tables takes effect only after CR3 is reloaded. The write entry is separate
+// because only a write marks the page dirty and checks that it may be written.
+var code_page: u32 = 0xFFFFFFFF;
+var code_phys: u32 = 0;
+var read_page: u32 = 0xFFFFFFFF;
+var read_phys: u32 = 0;
+var write_page: u32 = 0xFFFFFFFF;
+var write_phys: u32 = 0;
+
+// Forgets the cached translations. Called when the page tables are switched, paging is turned on
+// or off, or the privilege level changes (a cached page was checked for one level only).
+fn flush_tlb() {
+    code_page = 0xFFFFFFFF;
+    read_page = 0xFFFFFFFF;
+    write_page = 0xFFFFFFFF;
+}
+
+fn set_cpl(level: u8) {
+    if level != cpu.cpl { flush_tlb(); }
+    cpu.cpl = level;
+}
 
 fn protected() -> bool { return cr[0] & 1 != 0; }
 fn paging() -> bool { return cr[0] & 0x80000000 != 0; }
@@ -165,7 +191,7 @@ fn translate(a: u32, write: bool, user: bool) -> u32 {
 // translated byte by byte, after checking every page it touches so that a fault leaves nothing
 // half written.
 fn lin_read(a: u32, w: u8, user: bool) -> u32 {
-    let n: u32 = (w as u32) / 8;
+    let n: u32 = ((w as u32) >> 3);
     if !paging() || (a & 0xFFF) + n <= 0x1000 {
         let p = translate(a, false, user);
         if w == 8 { return mem8(p); }
@@ -181,7 +207,7 @@ fn lin_read(a: u32, w: u8, user: bool) -> u32 {
 }
 
 fn lin_write(a: u32, w: u8, v: u32, user: bool) {
-    let n: u32 = (w as u32) / 8;
+    let n: u32 = ((w as u32) >> 3);
     if !paging() || (a & 0xFFF) + n <= 0x1000 {
         let p = translate(a, true, user);
         if w == 8 { set_mem8(p, v as! u8); }
@@ -203,7 +229,7 @@ fn sys_write(a: u32, w: u8, v: u32) { lin_write(a, w, v, false); }
 // A violation is a stack fault for SS and a general protection fault for the others.
 fn seg_check(s: i64, off: u32, w: u8, write: bool) -> u32 {
     let a = cpu.attr[s];
-    let last = off + (w as u32) / 8 - 1;
+    let last = off + ((w as u32) >> 3) - 1;
     var bad = last < off;
     if protected() && !v86() {
         if a & A_VALID == 0 { bad = true; }
@@ -219,13 +245,34 @@ fn seg_check(s: i64, off: u32, w: u8, write: bool) -> u32 {
     return cpu.base[s] + off;
 }
 
-fn seg_read(s: i64, off: u32, w: u8) -> u32 {
-    return lin_read(seg_check(s, off, w, false), w, cpu.cpl == 3);
+// Data access at the current privilege level, through the cached translations when the access
+// lies within one page.
+fn data_read(a: u32, w: u8) -> u32 {
+    if (a & 0xFFF) + ((w as u32) >> 3) > 0x1000 { return lin_read(a, w, cpu.cpl == 3); }
+    if a >> 12 != read_page {
+        read_phys = translate(a, false, cpu.cpl == 3) & 0xFFFFF000;
+        read_page = a >> 12;
+    }
+    let p = read_phys | a & 0xFFF;
+    if w == 8 { return mem8(p); }
+    if w == 16 { return mem16(p); }
+    return mem32(p);
 }
 
-fn seg_write(s: i64, off: u32, w: u8, v: u32) {
-    lin_write(seg_check(s, off, w, true), w, v, cpu.cpl == 3);
+fn data_write(a: u32, w: u8, v: u32) {
+    if (a & 0xFFF) + ((w as u32) >> 3) > 0x1000 { lin_write(a, w, v, cpu.cpl == 3); return; }
+    if a >> 12 != write_page {
+        write_phys = translate(a, true, cpu.cpl == 3) & 0xFFFFF000;
+        write_page = a >> 12;
+    }
+    let p = write_phys | a & 0xFFF;
+    if w == 8 { set_mem8(p, v as! u8); }
+    else if w == 16 { set_mem16(p, v as! u16); }
+    else { set_mem32(p, v); }
 }
+
+fn seg_read(s: i64, off: u32, w: u8) -> u32 { return data_read(seg_check(s, off, w, false), w); }
+fn seg_write(s: i64, off: u32, w: u8, v: u32) { data_write(seg_check(s, off, w, true), w, v); }
 
 // ---- Registers ----
 
@@ -294,7 +341,7 @@ fn sp_get() -> u32 { if stack32() { return r32(SP); } return r16(SP); }
 fn sp_set(v: u32) { if stack32() { set_r32(SP, v); } else { set_r16(SP, v as! u16); } }
 
 fn push_w(v: u32, w: u8) {
-    var sp = sp_get() - (w as u32) / 8;
+    var sp = sp_get() - ((w as u32) >> 3);
     if !stack32() { sp &= 0xFFFF; }
     seg_write(SS, sp, w, v);
     sp_set(sp);
@@ -303,7 +350,7 @@ fn push_w(v: u32, w: u8) {
 fn pop_w(w: u8) -> u32 {
     let sp = sp_get();
     let v = seg_read(SS, sp, w);
-    sp_set(sp + (w as u32) / 8);
+    sp_set(sp + ((w as u32) >> 3));
     return v;
 }
 
