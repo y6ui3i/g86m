@@ -1,9 +1,15 @@
-// Instruction execution: a 386 in real mode. Operands are 16 bits and addresses 16 bits unless the
-// 66h and 67h prefixes say otherwise. To software that asks, the machine is a 386 with no FPU and
-// no CPUID: FLAGS bits 12-14 can be written and PUSH SP pushes the value from before the decrement.
+// Instruction execution: a 386, in real mode, protected mode and virtual-8086 mode. The default
+// operand and address size come from the code segment (16 bits in real mode); the 66h and 67h
+// prefixes switch to the other. To software that asks, the machine is a 386 with no FPU and no
+// CPUID: FLAGS bits 12-14 can be written and PUSH SP pushes the value from before the decrement.
+//
+// exec_one runs one instruction and returns false when a fault cut it short (see raise in
+// state.goose). step wraps it: it restores the state the instruction started from and delivers
+// the fault.
 
 import state;
 import alu;
+import prot;
 import bios;
 import dev;
 
@@ -13,30 +19,24 @@ var seg_ovr = -1;            // segment override: -1 none, else ES CS SS DS FS G
 var rep: u8 = 0;             // 0 none, 1 REPNE (F2), 2 REP/REPE (F3)
 var osz: u8 = 16;            // operand size of this instruction: 16 or 32
 var asz32 = false;           // this instruction addresses memory with 32-bit offsets
+var lock = false;            // the instruction has a LOCK prefix
 var shadow = false;          // the instruction just executed holds interrupts off for one more
-var insn_ip: u32 = 0;        // start of the instruction, prefixes included; where a fault returns to
 var m_mod: u8 = 0;
 var m_reg: u8 = 0;
 var m_rm: u8 = 0;
-var ea_seg = DS;             // segment register of the effective address
+var ea_seg = 3;              // segment register of the effective address (starts as DS)
 var ea_off: u32 = 0;
-
-// ---- Control registers and descriptor table registers (stored; protected mode is not there yet) ----
-
-var cr: u32[8] = [0; 8];     // CR0 starts at zero: no coprocessor, so the ET bit is clear
-var gdtr_base: u32 = 0;
-var gdtr_limit: u16 = 0;
-var idtr_base: u32 = 0;
-var idtr_limit: u16 = 0x3FF;
 
 // ---- Fetch ----
 
-// In real mode the instruction pointer is 16 bits.
-fn advance(n: u32) { cpu.ip = (cpu.ip + n) & 0xFFFF; }
+// The code segment decides the default operand and address size, and the width of EIP.
+fn code32() -> bool { return cpu.attr[CS] & A_BIG != 0; }
 
 fn fetch8() -> u8 {
-    let b = seg_read(CS, cpu.ip, 8) as! u8;
-    advance(1);
+    if cpu.ip > cpu.limit[CS] { raise_gp(0); }
+    let b = lin_read(cpu.base[CS] + cpu.ip, 8, cpu.cpl == 3) as! u8;
+    cpu.ip += 1;
+    if !code32() { cpu.ip &= 0xFFFF; }
     return b;
 }
 
@@ -150,8 +150,8 @@ fn cond(c: u8) -> bool {
 
 // ---- Stack and control transfer, at the operand size ----
 
-fn pushv(v: u32) { if osz == 16 { push16(v as! u16); } else { push32(v); } }
-fn popv() -> u32 { if osz == 16 { return pop16(); } return pop32(); }
+fn pushv(v: u32) { push_w(v, osz); }
+fn popv() -> u32 { return pop_w(osz); }
 
 // A jump target is cut to 16 bits when the operand size is 16.
 fn set_ip(v: u32) { cpu.ip = if osz == 16 { v & 0xFFFF } else { v }; }
@@ -161,17 +161,18 @@ fn jump_rel8(taken: bool) {
     if taken { set_ip(cpu.ip + d); }
 }
 
-// A fault that returns to the start of the instruction: divide error (0), invalid opcode (6).
-fn fault(n: u8) {
-    cpu.ip = insn_ip;
-    interrupt(n);
-}
+// A fault with no error code: divide error (0), bound range (5), invalid opcode (6).
+fn fault(n: u8) { raise(n, false, 0); }
 
-fn far_call(seg: u16, off: u32) {
-    pushv(cpu.segs[CS]);
-    pushv(cpu.ip);
-    set_seg(CS, seg);
-    set_ip(off);
+// Instructions only the most privileged level may execute.
+fn need_ring0() { if protected() && cpu.cpl != 0 { raise_gp(0); } }
+
+// Instructions that need the I/O privilege level: CLI, STI, and in virtual-8086 mode also
+// PUSHF, POPF, INT n and IRET.
+fn io_sensitive() {
+    if !protected() { return; }
+    if v86() { if iopl() < 3 { raise_gp(0); } }
+    else if cpu.cpl > iopl() { raise_gp(0); }
 }
 
 // ---- Registers used as addresses and counters: 16 or 32 bits by the address size ----
@@ -218,16 +219,21 @@ fn string_op(op: u8) {
                 addr_reg_add(DI, d);
             },
             0x6C => {
+                io_check(r16(DX), w);
                 seg_write(ES, addr_reg(DI), w, port_read(r16(DX), w));
                 addr_reg_add(DI, d);
             },
             _ => {
+                io_check(r16(DX), w);
                 port_write(r16(DX), w, seg_read(src, addr_reg(SI), w));
                 addr_reg_add(SI, d);
             },
         }
         if rep == 0 { break; }
         addr_reg_add(CX, 0xFFFFFFFF);
+        // A repeated instruction that faults part-way resumes from where it got to.
+        saved.regs = cpu.regs;
+        saved.flags = cpu.flags;
         if kind == 0xA6 || kind == 0xAE {
             if rep == 2 && !flag(ZF) { break; }
             if rep == 1 && flag(ZF) { break; }
@@ -340,14 +346,13 @@ fn group45(op: u8) {
         3 => {
             if m_mod == 3 { fault(6); return; }
             let off = seg_read(ea_seg, ea_off, osz);
-            far_call(seg_read(ea_seg, ea_off + (osz as u32) / 8, 16) as! u16, off);
+            far_call(seg_read(ea_seg, ea_off + (osz as u32) / 8, 16) as! u16, off, osz);
         },
         4 => { set_ip(rm_read(osz)); },
         5 => {
             if m_mod == 3 { fault(6); return; }
             let off = seg_read(ea_seg, ea_off, osz);
-            set_seg(CS, seg_read(ea_seg, ea_off + (osz as u32) / 8, 16) as! u16);
-            set_ip(off);
+            far_jump(seg_read(ea_seg, ea_off + (osz as u32) / 8, 16) as! u16, off);
         },
         6 => { pushv(rm_read(osz)); },
         _ => { fault(6); },
@@ -397,8 +402,8 @@ fn load_far(s: i64) {
     if m_mod == 3 { fault(6); return; }
     let off = seg_read(ea_seg, ea_off, osz);
     let sel = seg_read(ea_seg, ea_off + (osz as u32) / 8, 16) as! u16;
+    load_seg(s, sel);
     set_regw(m_reg, osz, off);
-    set_seg(s, sel);
     if s == SS { shadow = true; }
 }
 
@@ -424,56 +429,130 @@ fn bit_op(action: u8, bit: u32, from_register: bool) {
 fn two_byte() {
     let op = fetch8();
     match op {
-        0x00 => { fault(6); },                               // SLDT STR LLDT LTR VERR VERW: not in real mode
+        0x00 => {
+            decode_modrm();
+            if !protected() || v86() { fault(6); }
+            match m_reg {
+                0 => { rm_write(if m_mod == 3 { osz } else { 16 }, ldtr_sel); },         // SLDT
+                1 => { rm_write(if m_mod == 3 { osz } else { 16 }, tr_sel); },           // STR
+                2 => {                                                                    // LLDT
+                    need_ring0();
+                    let sel = rm_read(16) as! u16;
+                    if sel & 0xFFFC == 0 { ldtr_sel = sel; ldtr_base = 0; ldtr_limit = 0; return; }
+                    if sel & 4 != 0 { raise_gp(sel & 0xFFFC); }
+                    let at, lo, hi = read_desc(sel, 0);
+                    if hi >> 8 & 0x1F != 2 { raise_gp(sel & 0xFFFC); }
+                    if hi & 0x8000 == 0 { raise_np(sel & 0xFFFC); }
+                    ldtr_sel = sel;
+                    ldtr_base = d_base(lo, hi);
+                    ldtr_limit = d_limit(lo, hi);
+                },
+                3 => {                                                                    // LTR
+                    need_ring0();
+                    let sel = rm_read(16) as! u16;
+                    if sel & 0xFFFC == 0 { raise_gp(0); }
+                    if sel & 4 != 0 { raise_gp(sel & 0xFFFC); }
+                    let at, lo, hi = read_desc(sel, 0);
+                    let kind = hi >> 8 & 0x1F;
+                    if kind != 1 && kind != 9 { raise_gp(sel & 0xFFFC); }
+                    if hi & 0x8000 == 0 { raise_np(sel & 0xFFFC); }
+                    tr_sel = sel;
+                    tr_base = d_base(lo, hi);
+                    tr_limit = d_limit(lo, hi);
+                    tr_32 = kind == 9;
+                    sys_write(at + 5, 8, hi >> 8 & 0xFF | 2);                             // now busy
+                },
+                4, 5 => {                                                                 // VERR, VERW
+                    let sel = rm_read(16) as! u16;
+                    let at, ok = desc_at(sel);
+                    var good = ok && sel & 0xFFFC != 0;
+                    if good {
+                        let hi = sys_read(at + 4, 32);
+                        let acc = hi >> 8;
+                        let rpl: u8 = (sel & 3) as! u8;
+                        if acc & A_S == 0 { good = false; }
+                        else if m_reg == 4 && acc & A_CODE != 0 && acc & A_RW == 0 { good = false; }
+                        else if m_reg == 5 && (acc & A_CODE != 0 || acc & A_RW == 0) { good = false; }
+                        else if (acc & A_CODE == 0 || acc & A_DOWN_CONF == 0) && (d_dpl(hi) < cpu.cpl || d_dpl(hi) < rpl) { good = false; }
+                    }
+                    set_flag(ZF, good);
+                },
+                _ => { fault(6); },
+            }
+        },
         0x01 => {
             decode_modrm();
             match m_reg {
                 0, 1 => {                                    // SGDT, SIDT
-                    if m_mod == 3 { fault(6); return; }
+                    if m_mod == 3 { fault(6); }
                     seg_write(ea_seg, ea_off, 16, if m_reg == 0 { gdtr_limit } else { idtr_limit });
                     seg_write(ea_seg, ea_off + 2, 32, if m_reg == 0 { gdtr_base } else { idtr_base });
                 },
                 2, 3 => {                                    // LGDT, LIDT
-                    if m_mod == 3 { fault(6); return; }
-                    let limit = seg_read(ea_seg, ea_off, 16) as! u16;
+                    if m_mod == 3 { fault(6); }
+                    need_ring0();
+                    let limit = seg_read(ea_seg, ea_off, 16);
                     var base = seg_read(ea_seg, ea_off + 2, 32);
                     if osz == 16 { base &= 0x00FFFFFF; }
                     if m_reg == 2 { gdtr_limit = limit; gdtr_base = base; }
                     else { idtr_limit = limit; idtr_base = base; }
                 },
-                4 => { rm_write(if m_mod == 3 { osz } else { 16 }, cr[0] & (if m_mod == 3 && osz == 32 { 0xFFFFFFFF } else { 0xFFFF })); },
+                4 => { rm_write(if m_mod == 3 { osz } else { 16 }, if m_mod == 3 && osz == 32 { cr[0] } else { cr[0] & 0xFFFF }); },
                 6 => {                                       // LMSW: can set PE, cannot clear it
-                    let v = rm_read(16);
-                    if v & 1 != 0 { cpu.ip = insn_ip; stop("protected mode (LMSW) is not implemented", 1); return; }
-                    cr[0] = cr[0] & 0xFFFFFFF1 | v & 0x0E;
+                    need_ring0();
+                    cr[0] = cr[0] & 0xFFFFFFF1 | rm_read(16) & 0x0F;
                 },
                 _ => { fault(6); },
             }
         },
-        0x02, 0x03 => { fault(6); },                         // LAR, LSL: not in real mode
-        0x06 => { cr[0] &= 0xFFFFFFF7; },                    // CLTS
+        0x02, 0x03 => {                                      // LAR, LSL
+            decode_modrm();
+            if !protected() || v86() { fault(6); }
+            let sel = rm_read(16) as! u16;
+            let at, ok = desc_at(sel);
+            var good = ok && sel & 0xFFFC != 0;
+            var lo: u32 = 0;
+            var hi: u32 = 0;
+            if good {
+                lo = sys_read(at, 32);
+                hi = sys_read(at + 4, 32);
+                let acc = hi >> 8;
+                let rpl: u8 = (sel & 3) as! u8;
+                let kind = acc & 0x0F;
+                if acc & A_S == 0 {
+                    // System segments: LAR takes task segments, LDTs and gates; LSL only those with a limit.
+                    let with_limit = kind == 1 || kind == 2 || kind == 3 || kind == 9 || kind == 11;
+                    let gate = kind == 4 || kind == 5 || kind == 12;
+                    if !(with_limit || (op == 0x02 && gate)) { good = false; }
+                    else if d_dpl(hi) < cpu.cpl || d_dpl(hi) < rpl { good = false; }
+                }
+                else if (acc & A_CODE == 0 || acc & A_DOWN_CONF == 0) && (d_dpl(hi) < cpu.cpl || d_dpl(hi) < rpl) { good = false; }
+            }
+            set_flag(ZF, good);
+            if good {
+                if op == 0x02 { set_regw(m_reg, osz, if osz == 32 { hi & 0x00F0FF00 } else { hi & 0xFF00 }); }
+                else { set_regw(m_reg, osz, d_limit(lo, hi)); }
+            }
+        },
+        0x06 => { need_ring0(); cr[0] &= 0xFFFFFFF7; },      // CLTS
         0x0B => { fault(6); },                               // UD2
-        0x20 => { decode_modrm(); set_r32(m_rm, cr[m_reg]); },
+        0x20 => { decode_modrm(); need_ring0(); set_r32(m_rm, cr[m_reg]); },
         0x22 => {
             decode_modrm();
-            let v = r32(m_rm);
-            if m_reg == 0 && v & 0x80000001 != 0 {
-                cpu.ip = insn_ip;
-                stop("protected mode or paging (MOV CR0) is not implemented", 0);
-                return;
-            }
-            cr[m_reg] = v;
+            need_ring0();
+            cr[m_reg] = r32(m_rm);
+            if !protected() { cpu.cpl = 0; }
         },
-        0x21, 0x23 => { decode_modrm(); if op == 0x21 { set_r32(m_rm, 0); } },     // debug registers
+        0x21, 0x23 => { decode_modrm(); need_ring0(); if op == 0x21 { set_r32(m_rm, 0); } },     // debug registers
         0x80..0x90 => {
             let d = if osz == 16 { ((fetch16() as! u16) as! i16) as! u32 } else { fetch32() };
             if cond(op & 0x0F) { set_ip(cpu.ip + d); }
         },
         0x90..0xA0 => { decode_modrm(); rm_write(8, if cond(op & 0x0F) { 1 } else { 0 }); },
         0xA0 => { pushv(cpu.segs[FS]); },
-        0xA1 => { set_seg(FS, popv() as! u16); },
+        0xA1 => { load_seg(FS, popv() as! u16); },
         0xA8 => { pushv(cpu.segs[GS]); },
-        0xA9 => { set_seg(GS, popv() as! u16); },
+        0xA9 => { load_seg(GS, popv() as! u16); },
         0xA3 => { decode_modrm(); bit_op(0, regw(m_reg, osz), true); },
         0xAB => { decode_modrm(); bit_op(1, regw(m_reg, osz), true); },
         0xB3 => { decode_modrm(); bit_op(2, regw(m_reg, osz), true); },
@@ -520,17 +599,62 @@ fn two_byte() {
         },
         // Instructions from the 486 on (CPUID, CMPXCHG, XADD, BSWAP, RDTSC ...) are invalid here.
         0xA2, 0xB0, 0xB1, 0xC0, 0xC1, 0xC8..0xD0, 0x31 => { fault(6); },
-        _ => { cpu.ip = insn_ip; stop("unimplemented opcode 0F", op); },
+        _ => { cpu.ip = saved.ip; stop("unimplemented opcode 0F", op); },
+    }
+}
+
+// May the instruction with opcode op carry a LOCK prefix? Only a short list may, and only with a
+// memory destination: the ALU operations that write, NOT, NEG, INC, DEC, XCHG, and the bit
+// instructions that write. Anything else with LOCK is an invalid opcode. This looks at the bytes
+// after the opcode without consuming them.
+fn lockable(op: u8) -> bool {
+    var at = cpu.base[CS] + cpu.ip;
+    var two = false;
+    var code = op;
+    if op == 0x0F {
+        code = lin_read(at, 8, cpu.cpl == 3) as! u8;
+        at += 1;
+        two = true;
+    }
+    let m = lin_read(at, 8, cpu.cpl == 3) as! u8;
+    if m >> 6 == 3 { return false; }
+    let r = m >> 3 & 7;
+    if two {
+        if code == 0xAB || code == 0xB3 || code == 0xBB { return true; }
+        return code == 0xBA && r >= 5;
+    }
+    if code < 0x38 && code & 7 < 2 { return true; }
+    match code {
+        0x80, 0x81, 0x83 => { return r != 7; },
+        0x86, 0x87 => { return true; },
+        0xF6, 0xF7 => { return r == 2 || r == 3; },
+        0xFE, 0xFF => { return r < 2; },
+        _ => { return false; },
     }
 }
 
 // ---- One instruction ----
 
-fn step() {
+// A fault waiting to be delivered: exec_one delivers it instead of executing an instruction.
+var pending = false;
+var pending_vec: u8 = 0;
+var pending_has_err = false;
+var pending_err: u32 = 0;
+
+// One instruction, or the delivery of a pending fault. False when a fault cut it short.
+fn exec_one() -> bool {
+    if pending {
+        pending = false;
+        deliver(pending_vec, false, pending_has_err, pending_err);
+        return true;
+    }
+    // A hardware interrupt is taken between instructions, then its handler's first one runs.
+    if irq_line && flag(IF) && !shadow { deliver(pic_ack(), false, false, 0); }
+
     // At a BIOS entry: perform the service instead of fetching an instruction, then IRET.
     if bios_on && cpu.segs[CS] == BIOS_SEG && cpu.ip < 256 {
         bios_call(cpu.ip as! u8);
-        iret();
+        do_iret(16);
         if bios_idle {
             // The service is waiting for an interrupt. A real BIOS waits with interrupts on,
             // whatever the caller's IF was.
@@ -538,15 +662,15 @@ fn step() {
             set_flag(IF, true);
             cpu.halted = true;
         }
-        return;
+        return true;
     }
 
-    insn_ip = cpu.ip;
     shadow = false;
+    lock = false;
     seg_ovr = -1;
     rep = 0;
-    osz = 16;
-    asz32 = false;
+    osz = if code32() { 32 } else { 16 };
+    asz32 = code32();
     var op = fetch8();
     loop {
         match op {
@@ -556,15 +680,17 @@ fn step() {
             0x3E => { seg_ovr = DS; },
             0x64 => { seg_ovr = FS; },
             0x65 => { seg_ovr = GS; },
-            0x66 => { osz = 32; },
-            0x67 => { asz32 = true; },
+            0x66 => { osz = if code32() { 16 } else { 32 }; },
+            0x67 => { asz32 = !code32(); },
             0xF2 => { rep = 1; },
             0xF3 => { rep = 2; },
-            0xF0 => {},
+            0xF0 => { lock = true; },
             _ => { break; },
         }
         op = fetch8();
     }
+
+    if lock && !lockable(op) { fault(6); }
 
     // In 00..3F, opcodes whose low 3 bits are 0..5 are the 8 operations in 6 forms.
     if op < 0x40 && op & 7 < 6 {
@@ -586,18 +712,18 @@ fn step() {
                 if aop != 7 { set_regw(0, w, r); }
             },
         }
-        return;
+        return true;
     }
 
     match op {
         0x06 => { pushv(cpu.segs[ES]); },
-        0x07 => { set_seg(ES, popv() as! u16); },
+        0x07 => { load_seg(ES, popv() as! u16); },
         0x0E => { pushv(cpu.segs[CS]); },
         0x0F => { two_byte(); },
         0x16 => { pushv(cpu.segs[SS]); },
-        0x17 => { set_seg(SS, popv() as! u16); shadow = true; },
+        0x17 => { load_seg(SS, popv() as! u16); shadow = true; },
         0x1E => { pushv(cpu.segs[DS]); },
-        0x1F => { set_seg(DS, popv() as! u16); },
+        0x1F => { load_seg(DS, popv() as! u16); },
         0x27 => { daa_das(false); },
         0x2F => { daa_das(true); },
         0x37 => { aaa_aas(false); },
@@ -619,7 +745,22 @@ fn step() {
                 if i != 4 { set_regw(i, osz, v); }
             }
         },
-        0x62, 0x63 => { fault(6); },                         // BOUND is not implemented; ARPL is not in real mode
+        0x62 => {                                            // BOUND
+            decode_modrm();
+            if m_mod == 3 { fault(6); }
+            let index = sx(regw(m_reg, osz), osz);
+            let lower = sx(seg_read(ea_seg, ea_off, osz), osz);
+            let upper = sx(seg_read(ea_seg, ea_off + (osz as u32) / 8, osz), osz);
+            if index < lower || index > upper { fault(5); }
+        },
+        0x63 => {                                            // ARPL
+            if !protected() || v86() { fault(6); }
+            decode_modrm();
+            let dst = rm_read(16);
+            let src: u32 = r16(m_reg);
+            if dst & 3 < src & 3 { rm_write(16, dst & 0xFFFC | src & 3); set_flag(ZF, true); }
+            else { set_flag(ZF, false); }
+        },
         0x68 => { pushv(fetchv()); },
         0x6A => { pushv(fetch_s8()); },
         0x69, 0x6B => {
@@ -658,15 +799,15 @@ fn step() {
         0x8A, 0x8B => { let w = width(op); decode_modrm(); set_regw(m_reg, w, rm_read(w)); },
         0x8C => {
             decode_modrm();
-            if m_reg > 5 { fault(6); return; }
+            if m_reg > 5 { fault(6); }
             // To a register the selector is zero-extended to the operand size; to memory it is 16 bits.
             rm_write(if m_mod == 3 { osz } else { 16 }, cpu.segs[m_reg]);
         },
         0x8D => { decode_modrm(); set_regw(m_reg, osz, ea_off); },
         0x8E => {
             decode_modrm();
-            if m_reg > 5 || m_reg == CS { fault(6); return; }
-            set_seg(m_reg, rm_read(16) as! u16);
+            if m_reg > 5 || m_reg == CS { fault(6); }
+            load_seg(m_reg, rm_read(16) as! u16);
             if m_reg == SS { shadow = true; }
         },
         0x8F => { let v = popv(); decode_modrm(); rm_write(osz, v); },
@@ -680,10 +821,17 @@ fn step() {
             if osz == 16 { set_r16(DX, if r16(AX) & 0x8000 != 0 { 0xFFFF } else { 0 }); }
             else { set_r32(DX, if r32(AX) & 0x80000000 != 0 { 0xFFFFFFFF } else { 0 }); }
         },
-        0x9A => { let off = fetchv(); let seg = fetch16() as! u16; far_call(seg, off); },
+        0x9A => { let off = fetchv(); let seg = fetch16() as! u16; far_call(seg, off, osz); },
         0x9B => {},
-        0x9C => { pushv(cpu.flags & 0x7FD5 | 2); },
-        0x9D => { write_flags(popv()); },
+        0x9C => { if v86() { io_sensitive(); } pushv(cpu.flags & 0x00FCFFFF); },
+        0x9D => {
+            if v86() { io_sensitive(); }
+            // IF changes only if the level may do I/O; IOPL only at level 0 (always, in real mode).
+            var m: u32 = 0x4DD5;
+            if !protected() || cpu.cpl == 0 { m |= IOPL; }
+            if !protected() || (if v86() { iopl() == 3 } else { cpu.cpl <= iopl() }) { m |= IF; }
+            write_flags(popv(), m);
+        },
         0x9E => { cpu.flags = cpu.flags & 0xFFFFFF00 | (r8(4) & 0xD5) | 2; },
         0x9F => { set_r8(4, cpu.flags as! u8); },
 
@@ -704,44 +852,42 @@ fn step() {
             let n = fetch8();
             rm_write(w, shift(m_reg, rm_read(w), n, w));
         },
-        0xC2 => { let n = fetch16() as! u16; set_ip(popv()); set_r16(SP, r16(SP) + n); },
+        0xC2 => { let n = fetch16(); set_ip(popv()); sp_set(sp_get() + n); },
         0xC3 => { set_ip(popv()); },
         0xC4 => { load_far(ES); },
         0xC5 => { load_far(DS); },
         0xC6, 0xC7 => { let w = width(op); decode_modrm(); rm_write(w, fetchw(w)); },
         0xC8 => {
-            let size = fetch16() as! u16;
+            // Two widths are in play: what is pushed is as wide as the operand size, while BP and
+            // SP move at the width of the stack segment. The frame pointer is the raw ESP, so
+            // with a 16-bit stack and a 32-bit operand its upper half shows whatever ESP had.
+            // The last step probes the new top of the stack for writing without writing it.
+            // (rustx86 worked these out against test386, stage 1A.)
+            let size = fetch16();
             let level = fetch8() & 0x1F;
+            let big = stack32();
             pushv(regw(BP, osz));
-            let frame = r16(SP);
+            let frame = r32(SP);
             if level > 0 {
                 for i in 1..level {
-                    set_r16(BP, r16(BP) - (osz as u16) / 8);
-                    pushv(seg_read(SS, r16(BP), osz));
+                    if big { set_r32(BP, r32(BP) - (osz as u32) / 8); } else { set_r16(BP, r16(BP) - (osz as u16) / 8); }
+                    pushv(seg_read(SS, if big { r32(BP) } else { r16(BP) }, osz));
                 }
                 pushv(frame);
             }
-            // The frame pointer is as wide as the stack pointer: 16 bits in real mode, even when
-            // a 32-bit EBP was pushed.
-            set_r16(BP, frame);
-            set_r16(SP, r16(SP) - size);
+            if big { set_r32(BP, frame); } else { set_r16(BP, frame as! u16); }
+            var top = sp_get() - size;
+            if !big { top &= 0xFFFF; }
+            let probe = translate(cpu.base[SS] + top, true, cpu.cpl == 3);
+            sp_set(top);
         },
-        0xC9 => { set_r16(SP, r16(BP)); let v = popv(); set_regw(BP, osz, v); },
-        0xCA => {
-            let n = fetch16() as! u16;
-            let ip = popv();
-            set_seg(CS, popv() as! u16);
-            set_ip(ip);
-            set_r16(SP, r16(SP) + n);
-        },
-        0xCB => { let ip = popv(); set_seg(CS, popv() as! u16); set_ip(ip); },
-        0xCC => { interrupt(3); },
-        0xCD => { let n = fetch8(); interrupt(n); },
-        0xCE => { if flag(OF) { interrupt(4); } },
-        0xCF => {
-            if osz == 16 { iret(); }
-            else { let ip = pop32(); set_seg(CS, pop32() as! u16); cpu.ip = ip; write_flags(pop32()); }
-        },
+        0xC9 => { sp_set(if stack32() { r32(BP) } else { r16(BP) }); let v = popv(); set_regw(BP, osz, v); },
+        0xCA => { let n = fetch16(); far_ret(osz, n); if osz == 16 { cpu.ip &= 0xFFFF; } },
+        0xCB => { far_ret(osz, 0); if osz == 16 { cpu.ip &= 0xFFFF; } },
+        0xCC => { deliver(3, true, false, 0); },
+        0xCD => { let n = fetch8(); if v86() { io_sensitive(); } deliver(n, true, false, 0); },
+        0xCE => { if flag(OF) { deliver(4, true, false, 0); } },
+        0xCF => { do_iret(osz); if osz == 16 { cpu.ip &= 0xFFFF; } },
 
         0xD0..0xD4 => {
             let w = width(op);
@@ -751,7 +897,7 @@ fn step() {
         },
         0xD4 => {
             let base = fetch8();
-            if base == 0 { fault(0); return; }
+            if base == 0 { fault(0); }
             let al = r8(0);
             set_r8(4, al / base);
             set_r8(0, al % base);
@@ -773,30 +919,54 @@ fn step() {
         0xE1 => { addr_reg_add(CX, 0xFFFFFFFF); jump_rel8(addr_reg(CX) != 0 && flag(ZF)); },
         0xE2 => { addr_reg_add(CX, 0xFFFFFFFF); jump_rel8(addr_reg(CX) != 0); },
         0xE3 => { jump_rel8(addr_reg(CX) == 0); },
-        0xE4 => { let port = fetch8(); set_r8(0, port_in8(port)); },
-        0xE5 => { let port = fetch8(); set_regw(AX, osz, port_read(port, osz)); },
-        0xE6 => { let port = fetch8(); port_out8(port, r8(0)); },
-        0xE7 => { let port = fetch8(); port_write(port, osz, regw(AX, osz)); },
+        0xE4 => { let port = fetch8(); io_check(port, 8); set_r8(0, port_in8(port)); },
+        0xE5 => { let port = fetch8(); io_check(port, osz); set_regw(AX, osz, port_read(port, osz)); },
+        0xE6 => { let port = fetch8(); io_check(port, 8); port_out8(port, r8(0)); },
+        0xE7 => { let port = fetch8(); io_check(port, osz); port_write(port, osz, regw(AX, osz)); },
         0xE8 => { let d = fetchv(); pushv(cpu.ip); set_ip(cpu.ip + d); },
         0xE9 => { let d = fetchv(); set_ip(cpu.ip + d); },
-        0xEA => { let off = fetchv(); let seg = fetch16() as! u16; set_seg(CS, seg); set_ip(off); },
+        0xEA => { let off = fetchv(); let seg = fetch16() as! u16; far_jump(seg, off); },
         0xEB => { jump_rel8(true); },
-        0xEC => { set_r8(0, port_in8(r16(DX))); },
-        0xED => { set_regw(AX, osz, port_read(r16(DX), osz)); },
-        0xEE => { port_out8(r16(DX), r8(0)); },
-        0xEF => { port_write(r16(DX), osz, regw(AX, osz)); },
+        0xEC => { io_check(r16(DX), 8); set_r8(0, port_in8(r16(DX))); },
+        0xED => { io_check(r16(DX), osz); set_regw(AX, osz, port_read(r16(DX), osz)); },
+        0xEE => { io_check(r16(DX), 8); port_out8(r16(DX), r8(0)); },
+        0xEF => { io_check(r16(DX), osz); port_write(r16(DX), osz, regw(AX, osz)); },
 
-        0xF4 => { cpu.halted = true; },
+        0xF4 => { need_ring0(); cpu.halted = true; },
         0xF5 => { set_flag(CF, !flag(CF)); },
         0xF6, 0xF7 => { group3(op); },
         0xF8 => { set_flag(CF, false); },
         0xF9 => { set_flag(CF, true); },
-        0xFA => { set_flag(IF, false); },
-        0xFB => { if !flag(IF) { shadow = true; } set_flag(IF, true); },
+        0xFA => { io_sensitive(); set_flag(IF, false); },
+        0xFB => { io_sensitive(); if !flag(IF) { shadow = true; } set_flag(IF, true); },
         0xFC => { set_flag(DF, false); },
         0xFD => { set_flag(DF, true); },
         0xFE, 0xFF => { group45(op); },
 
-        _ => { cpu.ip = insn_ip; stop("unimplemented opcode", op); },
+        _ => { cpu.ip = saved.ip; stop("unimplemented opcode", op); },
+    }
+    return true;
+}
+
+// Runs one instruction; if it faults, puts the state back and delivers the fault. A fault while
+// delivering a fault becomes a double fault, and a fault while delivering that stops the machine
+// (a real one would reset).
+fn step() {
+    saved = cpu;
+    if exec_one() { return; }
+    var vec = fault_vec;
+    var has_err = fault_has_err;
+    var err = fault_err;
+    for attempt in 3 {
+        cpu = saved;
+        if attempt == 2 { stop("triple fault; the last vector was", vec); return; }
+        pending = true;
+        pending_vec = vec;
+        pending_has_err = has_err;
+        pending_err = err;
+        if exec_one() { return; }
+        vec = 8;
+        has_err = true;
+        err = 0;
     }
 }

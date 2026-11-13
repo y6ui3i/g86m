@@ -599,3 +599,61 @@ far the codes get.
     reference masks undefined flags, so every difference is a real one
 - **Cut-off**: Each code reached is recorded. If the day ends before FFh, the PR says which code
   it stops at and why.
+
+### Result
+
+2026-11-13. **Both halves of the hypothesis held. test386 reaches code FFh and its output matches the
+reference on every byte.**
+
+```
+post 00 01 02 03 04 05 06 08 09 20 21 22 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c e0 ee ff
+```
+
+- The serial output is 44,926 lines, 3,548,969 bytes, and `cmp` finds no difference from
+  `test386-EE-reference.txt`. The debug and the release build give the same result
+- 104,513,187 instructions; 3.2 s on the release build, 31 s on the debug build
+- It is in `tools/difftest.sh` on both builds, which now has 33 checks; all pass. A missing ROM is
+  reported as skipped
+- ELKS, FreeDOS and the seventeen traces still pass
+
+How it went, by the code the ROM stopped at:
+
+| Stopped at | Cause | Fix |
+|---|---|---|
+| 08 | Expected: protected mode did not exist | Descriptor caches with limits and rights, CR0.PE, paging, fault delivery, privilege changes, virtual-8086 mode (`src/prot.goose`, and most of `src/state.goose`) |
+| 09 | A timer interrupt arrived as soon as the ROM ran STI. The ROM replaces the BIOS, so nothing had set up the interrupt controller, but g86m started it as the BIOS leaves it | In ROM mode the controller starts fully masked and the timer stopped |
+| 12 | `LOCK MOV` must be an invalid opcode. g86m ignored the LOCK prefix | LOCK is accepted only on the instructions that may take it, with a memory destination |
+| 1A | `ENTER` with a 32-bit operand on a 16-bit stack: the frame pointer pushed for nested levels is the raw ESP, upper half included, and the new top of stack is probed for writing | Followed rustx86, which had worked both out against this same stage |
+| FF, output one byte long | The serial port's baud-rate divisor was recorded as a byte sent | The data register is the divisor while the divisor latch is open |
+
+Stages 09, 20 (ring 3), 21 (virtual-8086 mode), 0B–11 (including page faults) and 13–19 passed the
+first time they were reached. The trace comparison against rustx86 that the card planned for a halt
+was not needed: each stop was found from the listing file and the last lines of g86m's own trace.
+
+How faults are done: a fault abandons the instruction from wherever it is found. `raise` records
+the fault and uses Goose's long-distance return (`return false from exec_one`) to leave every
+frame in between; `step` then restores the registers saved at the start of the instruction and
+delivers the fault. The compiler checks that every function that can fault is only ever called
+inside `exec_one`. That check caught one real mistake in the design before it ran: interrupts were
+delivered from the run loop, outside `exec_one`, where a fault in the delivery had nowhere to go.
+Delivery moved inside. (Notes on this are in [goose-notes.md](goose-notes.md).)
+
+One of g86m's own tests had to change. `u_stack` used a repeat count above FFFFh with a 32-bit
+address size in real mode, which runs past the 64 KB segment. rustx86 allows it; g86m now raises a
+general protection fault, as a 386 does. The count was reduced.
+
+Speed: bench.bin takes 6966–7156 ms on the release build = **about 52 MIPS**, down from about 78.
+Each instruction now copies the CPU state for a possible fault, each memory access checks its
+segment's limit and rights, and every call that can fault tests a flag on return. Nothing was done
+to win any of it back.
+
+What this does not cover:
+
+- **Task switching.** A task gate, a jump or call to a task segment, and IRET with NT set stop the
+  machine with a message. test386 only tests them in its 128 KB build, which was not used; code
+  22h appears in the trail above because the 64 KB build passes through that stage without testing
+- **There is no TLB.** Every access walks the page tables. Software that depends on a stale
+  translation surviving until it reloads CR3 would see different behaviour; test386 does not
+- **Memory is still 1 MB** and physical addresses wrap there. test386 stays inside it
+- **Debug registers, the single-step trap, and the resume flag** are not implemented
+- **Hardware interrupts in protected mode** go through the same delivery code but no test raises one

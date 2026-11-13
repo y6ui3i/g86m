@@ -43,7 +43,27 @@ Signed `%` returns a remainder with the sign of the divisor (`-32767 % 255` is `
 truncates toward zero. The remainder of x86 IDIV has the sign of the dividend, so it is computed as
 `n - q * d`. The standard library's `rem` also returns the sign of the dividend.
 
-## 3. Small things
+## 3. Long-distance return makes CPU faults simple, with two conditions
+
+A fault (a page fault, a protection fault) has to abandon the instruction from deep inside a memory
+access. Goose's `return E from f` does exactly that: `raise` in `src/state.goose` ends with
+`return false from exec_one`, and every frame between it and `exec_one` returns at once. No error
+value is threaded through the callers.
+
+The compiler checks that each call of a function that does this lies inside a call of `exec_one`.
+Two things follow, and both produced errors on the way:
+
+- **An unused function that can fault is an error.** A function nobody calls is not inside a call
+  of `exec_one`, so `push16`, `pop16` and a `raise_ud` helper that had lost their last callers were
+  rejected. Delete such helpers instead of keeping them around
+- **Everything that can fault must run under the one function.** Delivering an interrupt pushes on
+  the stack and so can fault; it could not stay in the run loop. This is the check doing its job
+
+Related: files may import each other in a cycle, but globals are initialized imported file first.
+`var saved: Cpu = cpu;` in the file that the file declaring `cpu` imports was rejected ("may be used
+before it is assigned"). The global went into the file that declares `cpu`.
+
+## 4. Small things
 
 - `args`, `write_stderr` and `exit` need `import os;`
 - A variable that holds a string literal is a `const u8[:]`

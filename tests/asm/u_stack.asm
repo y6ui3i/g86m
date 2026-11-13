@@ -75,7 +75,7 @@ start:
     scasd
     mov  esi, src
     mov  edi, dst
-    mov  ecx, 0x00010002
+    mov  ecx, 0x00000003         ; a count above FFFFh would run past the 64 KB segment and fault
     a32 rep movsw
     mov  ecx, 0x00020002
     rep  movsb

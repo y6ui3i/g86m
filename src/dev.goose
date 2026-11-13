@@ -251,7 +251,8 @@ var retrace: u8 = 0;
 // ---- Diagnostic port and serial port (used by the test386 ROM) ----
 
 var post_trail: u8[>..];     // every code written to the diagnostic port, in order
-var com_out: u8[>..];        // every byte written to COM1's data register
+var com_out: u8[>..];        // every byte sent through COM1
+var com_lcr: u8 = 0;         // COM1's line control register
 
 // ---- Port dispatch ----
 
@@ -294,8 +295,11 @@ fn port_out8(port: u16, v: u8) {
         0x3D4 => { crtc_index = v; },
         0x3D5 => { crtc[crtc_index & 31] = v; },
         0x190 => { post_trail.push(v); },
-        0x3F8 => { com_out.push(v); },
-        0x3F9..0x3FD => {},                              // COM1 setup
+        // With the divisor latch open (bit 7 of the line control register), the data register
+        // holds the low byte of the baud rate divisor, not a byte to send.
+        0x3F8 => { if com_lcr & 0x80 == 0 { com_out.push(v); } },
+        0x3FB => { com_lcr = v; },
+        0x3F9, 0x3FA, 0x3FC => {},                       // the rest of COM1's setup
         _ => { note_unknown(port); },
     }
 }

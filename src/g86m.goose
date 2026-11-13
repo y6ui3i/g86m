@@ -166,10 +166,6 @@ fn run_until(limit: i64) -> i64 {
                 continue;
             }
         }
-        if irq_line && flag(IF) && !shadow {
-            cpu.halted = false;
-            interrupt(pic_ack());
-        }
         step();
         vtime++;
         if timer_on {
@@ -255,6 +251,9 @@ fn main() {
         // The ROM ends at the top of the first megabyte. A CPU starts at the reset vector.
         for b, k in img { ram[RAM_SIZE - img.len + k] = b; }
         bios_on = false;
+        // No BIOS has set up the interrupt controller or the timer: nothing interrupts the ROM.
+        pic[0].imr = 0xFF;
+        timer_on = false;
         set_seg(CS, 0xF000);
         cpu.ip = 0xFFF0;
     } else {

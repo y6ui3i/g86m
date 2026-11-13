@@ -117,6 +117,27 @@ else
     echo "skip  freedos startup and freedos with F5 (images/fd14boot.img is not there)"
 fi
 
+# test386: a ROM that tests a 386 instruction by instruction in real, protected and virtual-8086
+# mode, with paging. It must reach diagnostic code FF, and what it prints on the serial port must
+# be the reference taken from real hardware, byte for byte.
+if [ -f images/test386.bin ] && [ -f images/test386-EE-reference.txt ]; then
+    for exe in build/g86m-debug build/g86m; do
+        "$exe" --headless --max 3000000000 --com build/test386.out images/test386.bin >/dev/null 2>build/test386.err
+        last=$(sed -n 's/.* post \(.*\) com .*/\1/p' build/test386.err | awk '{print $NF}')
+        if [ "$last" != "ff" ]; then
+            fail=1
+            echo "FAIL  test386 ($(basename "$exe")): stopped at code ${last:-none}"
+        elif ! cmp -s build/test386.out images/test386-EE-reference.txt; then
+            fail=1
+            echo "FAIL  test386 ($(basename "$exe")): reached FF but the output differs from the reference"
+        else
+            echo "ok    test386 ($(basename "$exe")): code FF, $(wc -l < build/test386.out | tr -d ' ') lines match the reference"
+        fi
+    done
+else
+    echo "skip  test386 (images/test386.bin and its reference are not there)"
+fi
+
 # The interactive console, driven through a pseudo-terminal. It takes the images that are there.
 if command -v python3 >/dev/null; then
     python3 -I tools/console_test.py build/g86m images 2>/dev/null || fail=1
