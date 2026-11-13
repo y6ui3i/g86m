@@ -17,7 +17,7 @@ import std;
 import os;
 import exec;
 
-let RAM_SIZE = 1048576;
+let RAM_SIZE = 134217728;       // 128 MB
 
 let AX = 0; let CX = 1; let DX = 2; let BX = 3;
 let SP = 4; let BP = 5; let SI = 6; let DI = 7;
@@ -128,10 +128,21 @@ fn raise_np(err: u32) { raise(11, true, err); }          // segment not present
 
 // ---- Physical memory ----
 //
-// Addresses wrap at 1 MB: there is no memory above it yet.
+// The 16-bit machine (boot sectors, floppies, ROMs) has 1 MB and its addresses wrap there, as on
+// a PC with the A20 line off. The 32-bit machine (a Linux kernel) has all of RAM_SIZE. Above the
+// end of memory nothing answers: reads give FFh and writes are dropped.
+var phys_mask: u32 = 0xFFFFF;
 
-fn mem8(a: u32) -> u8 { return ram[a & 0xFFFFF]; }
-fn set_mem8(a: u32, v: u8) { ram[a & 0xFFFFF] = v; }
+fn mem8(a: u32) -> u8 {
+    let p = a & phys_mask;
+    if p < RAM_SIZE { return ram[p]; }
+    return 0xFF;
+}
+
+fn set_mem8(a: u32, v: u8) {
+    let p = a & phys_mask;
+    if p < RAM_SIZE { ram[p] = v; }
+}
 
 fn mem16(a: u32) -> u16 {
     let lo: u16 = mem8(a);
@@ -184,6 +195,17 @@ fn translate(a: u32, write: bool, user: bool) -> u32 {
     if pde & 0x20 == 0 { set_mem32(pde_at, pde | 0x20); }
     let want: u32 = if write { 0x60 } else { 0x20 };
     if pte & want != want { set_mem32(pte_at, pte | want); }
+    return pte & 0xFFFFF000 | a & 0xFFF;
+}
+
+// The physical address behind a linear one for debugging output: no checks, no faults, no
+// accessed bits. Gives the linear address back where there is no mapping.
+fn translate_quiet(a: u32) -> u32 {
+    if !paging() { return a; }
+    let pde = mem32((cr[3] & 0xFFFFF000) + (a >> 22) * 4);
+    if pde & 1 == 0 { return a; }
+    let pte = mem32((pde & 0xFFFFF000) + (a >> 12 & 0x3FF) * 4);
+    if pte & 1 == 0 { return a; }
     return pte & 0xFFFFF000 | a & 0xFFF;
 }
 

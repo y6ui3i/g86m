@@ -8,7 +8,7 @@
 
 import state;
 
-var ram: u8[RAM_SIZE] = [0; RAM_SIZE];
+var ram: u8[RAM_SIZE];
 
 // Ports nothing answers: counted per port so a run can report what the guest probed.
 var unknown_ports: u8[65536] = [0; 65536];

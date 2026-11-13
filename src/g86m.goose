@@ -2,7 +2,9 @@
 //
 //   g86m [options] image
 //
-// A 512-byte image is a boot sector. A 64 KB or 128 KB image is a ROM that replaces the BIOS: it
+// A Linux kernel image (a bzImage) is loaded and entered directly, with --initrd and --append
+// giving its initramfs and command line; its console is the serial port, and what it prints there
+// goes to standard output. A 512-byte image is a boot sector. A 64 KB or 128 KB image is a ROM that replaces the BIOS: it
 // is placed at the top of the first megabyte and started at the reset vector, F000:FFF0. Anything
 // else is a floppy image booted as drive A.
 // A floppy image started from a terminal, with no script and no trace, opens the interactive
@@ -12,6 +14,7 @@
 //   --max N        stop after N instructions of virtual time
 //   --trace        print the state at every instruction boundary, one line each, in the same
 //                  format as rustx86's trace32 so the two can be diffed
+//   --trace-after N  like --trace, but starting once N instructions have run
 //   --wait TEXT    script step: run until TEXT is on the text screen
 //   --type TEXT    script step: type TEXT at the keyboard (\n is Enter; \kNN presses the key
 //                  with scancode NN in hex, so \k3F is F5)
@@ -19,8 +22,11 @@
 //   --ports        report the I/O ports the guest used that nothing answered, and how often
 //                  each BIOS service was called
 //   --headless     never open the interactive console
-//   --dump FILE    write the 1 MB of guest memory to FILE when the run ends
+//   --faults       report every fault except page faults on standard error
+//   --dump FILE    write the first 1 MB of guest memory to FILE when the run ends
 //   --com FILE     write what the guest sent to COM1 to FILE when the run ends
+//   --initrd FILE  the initramfs for a Linux kernel
+//   --append TEXT  the Linux kernel command line (default: console=ttyS0)
 //
 // Script steps run in the order given, and the run ends when the last one is done.
 
@@ -31,6 +37,7 @@ import exec;
 import bios;
 import dev;
 import console;
+import linux;
 import big;         // last on purpose: see big.goose
 
 var trace_buf: u8[>..];
@@ -148,6 +155,7 @@ let RUN_SCRIPT = 2;      // the script finished
 
 var vtime = 0;           // virtual time, in instructions
 var trace = false;
+var trace_after = -1;     // start tracing at this virtual time; -1 for never
 var scripted = false;
 var next_poll = 0;
 
@@ -174,6 +182,7 @@ fn run_until(limit: i64) -> i64 {
             if timer_left <= 0 { timer_fire(); }
         }
         if trace { trace_line(); }
+        else if trace_after >= 0 && vtime >= trace_after { trace = true; }
         if scripted && vtime >= next_poll {
             if script_poll() { return RUN_SCRIPT; }
             next_poll = vtime + 20000;
@@ -219,16 +228,27 @@ fn main() {
     var headless = false;
     var dump_arg = 0;
     var com_arg = 0;
+    var initrd_arg = 0;
+    var append_arg = 0;
     var max = 20000000000;
     var path: const u8[:] = "";
     var i = 1;
     while i < a.len {
         if a[i] == "--trace" { trace = true; }
+        else if a[i] == "--trace-after" && i + 1 < a.len {
+            i++;
+            let n, ok = parse_int(a[i]);
+            guard ok else { write_stderr("g86m: --trace-after needs a number\n"); exit(2); }
+            trace_after = n;
+        }
         else if a[i] == "--screen" { show_screen = true; }
         else if a[i] == "--ports" { show_ports = true; }
         else if a[i] == "--headless" { headless = true; }
+        else if a[i] == "--faults" { log_faults = true; }
         else if a[i] == "--dump" && i + 1 < a.len { i++; dump_arg = i; }
         else if a[i] == "--com" && i + 1 < a.len { i++; com_arg = i; }
+        else if a[i] == "--initrd" && i + 1 < a.len { i++; initrd_arg = i; }
+        else if a[i] == "--append" && i + 1 < a.len { i++; append_arg = i; }
         else if a[i] == "--max" && i + 1 < a.len {
             i++;
             let n, ok = parse_int(a[i]);
@@ -248,9 +268,23 @@ fn main() {
     var img: u8[>..] = [];
     guard read_file(path, img) else { write_stderr("g86m: cannot read image\n"); exit(2); }
     let rom = img.len == 65536 || img.len == 131072;
-    if rom {
+    let kernel = is_bzimage(img);
+    if kernel {
+        var initrd: u8[>..] = [];
+        if initrd_arg > 0 {
+            guard read_file(a[initrd_arg], initrd) else { write_stderr("g86m: cannot read the initramfs\n"); exit(2); }
+        }
+        let cmdline: const u8[:] = if append_arg > 0 { a[append_arg] } else { "console=ttyS0" };
+        let problem = linux_boot(img, initrd, cmdline);
+        guard problem.len == 0 else { write_stderr(str("g86m: ", problem, "\n")); exit(2); }
+        // No BIOS runs first: the interrupt controller is masked and the timer stopped.
+        bios_on = false;
+        pic[0].imr = 0xFF;
+        timer_on = false;
+        com_live = true;
+    } else if rom {
         // The ROM ends at the top of the first megabyte. A CPU starts at the reset vector.
-        for b, k in img { ram[RAM_SIZE - img.len + k] = b; }
+        for b, k in img { ram[0x100000 - img.len + k] = b; }
         bios_on = false;
         // No BIOS has set up the interrupt controller or the timer: nothing interrupts the ROM.
         pic[0].imr = 0xFF;
@@ -275,7 +309,7 @@ fn main() {
     }
 
     scripted = step_kind.len > 0;
-    var interactive = !trace && !scripted && !headless && img.len != 512 && !rom && con_is_tty() != 0;
+    var interactive = !trace && !scripted && !headless && img.len != 512 && !rom && !kernel && con_is_tty() != 0;
     if interactive {
         // Said on the ordinary screen first, so it is also there to scroll back to afterwards.
         write_stdout("g86m: Ctrl-] or F12 to quit\r\n");
@@ -286,6 +320,7 @@ fn main() {
     let t0 = clock_ns();
     if trace { trace_line(); }
     let result = if interactive { run_console(max) } else { run_until(max) };
+    com_flush();
     let ms = (clock_ns() - t0) / 1000000;
     if interactive {
         con_close();
@@ -309,7 +344,7 @@ fn main() {
     format(stats, ":");
     format_int(stats, cpu.ip, 16, 4, '0');
     if scripted { format(stats, " script ", step_pos, "/", step_kind.len); }
-    if !scripted && !interactive && !rom { format(stats, " console \"", tty, "\""); }
+    if !scripted && !interactive && !rom && !kernel { format(stats, " console \"", tty, "\""); }
     if rom {
         format(stats, " post");
         for code in post_trail { format(stats, " "); format_int(stats, code, 16, 2, '0'); }
@@ -321,7 +356,7 @@ fn main() {
         if !write_file(a[com_arg], com_out) { write_stderr("g86m: cannot write the serial output\n"); }
     }
     if dump_arg > 0 {
-        if !write_file(a[dump_arg], ram[..]) { write_stderr("g86m: cannot write the memory dump\n"); }
+        if !write_file(a[dump_arg], ram[..0x100000]) { write_stderr("g86m: cannot write the memory dump\n"); }
     }
     if show_ports {
         var ports: u8[>..] = [];

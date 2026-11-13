@@ -745,3 +745,67 @@ What this leaves:
   compiler reload the CPU state
 - The caches were checked by test386 and the two operating systems, but no test changes a page
   table entry and then relies on the old translation, which is what a cache makes possible
+
+## E011: Load a Linux kernel and see how far it gets (M5a, 2026-11-13)
+
+M5 is the last stage: 32-bit Linux with a busybox shell. rustx86's record of the same stage says it
+took five things: memory beyond 1 MB, a boot path that loads the kernel directly instead of going
+through a BIOS, a CPU that answers as an i686 (CPUID, TSC, CMPXCHG8B, CMOV and the 486's
+instructions), an x87 FPU (the kernel will not start without one), and a serial port for the
+console. The FPU is the largest.
+
+This card is the first three that need no CPU work: memory, the boot path and the serial port.
+
+- **Hypothesis**: With 128 MB of RAM, the Linux boot protocol's 32-bit entry (kernel at 1 MB, zero
+  page with the memory map, command line and initramfs, flat segments, ESI pointing at the zero
+  page) and a 16550 serial port, the kernel (Alpine's Linux 6.18, `vmlinuz-lts`, the one rustx86
+  boots) decompresses itself and starts. It then stops at the first thing a 386 without an FPU
+  lacks, and the stop names it.
+- **What changed since last time**: Until now memory was 1 MB and wrapped there. The machine keeps
+  its 16-bit behaviour (wrap at 1 MB, BIOS services) for boot sectors, floppies and ROMs; a Linux
+  kernel image gets the 32-bit machine.
+- **Next move for each result**:
+  - Stops on an unimplemented opcode or an invalid-opcode fault in the kernel → list what it
+    needed; that list is the work for the CPU step (M5b)
+  - The kernel prints that the CPU is too old or has no FPU → the same, and the message goes in
+    the record
+  - Hangs or faults before printing anything → the decompressor ran wrong. It is plain 386 code,
+    so that is a bug test386 did not catch: compare the trace with rustx86's from the entry point
+  - Reaches user space → not expected; if it happens, measure the instruction count and the time
+- **Cut-off**: The same day. The PR records where it stops; it does not have to boot.
+
+### Result
+
+2026-11-13. **The hypothesis held. The kernel decompresses itself, starts, and stops at the first
+486 instruction.**
+
+```
+g86m: fault 6 at 0060:c4a53859  bytes: f0 0f b1 13 75 11 8b 5d fc c9
+g86m: fault 6 at 0060:c412ccf6  bytes: f0 0f b1 73 0c 0f 85 47 02 00
+steps 393939741 halted true fault false ms 8809 at 0060:c409aeba
+```
+
+- `F0 0F B1` is `LOCK CMPXCHG`, an instruction the 486 added. g86m raises an invalid-opcode fault,
+  as a 386 would; the kernel's early fault handler uses the same instruction and faults again,
+  then halts
+- By then the kernel has run 393,939,741 instructions: the decompressor, and the kernel proper at
+  virtual address C0000000h and up with paging on. Nothing in those 394 million instructions
+  stopped on something unimplemented or went visibly wrong, though with no output there is no
+  proof it went right either
+- It printed nothing, even with `earlyprintk=serial`: it stopped before the serial console was
+  set up
+- 8.8 s on the release build, about 45 MIPS for this stretch
+- `tools/difftest.sh` is still at 33 of 33; bench.bin is unchanged at about 5.4 s
+
+Two debugging options were added on the way and are staying: `--trace-after N` starts the trace
+late in a run (the first attempt to see why the kernel halted would have written 394 million trace
+lines), and `--faults` reports every fault except page faults.
+
+What this leaves for the CPU step (M5b), from rustx86's record and this run:
+
+- `CMPXCHG` first, then the rest of what a kernel built for i686 uses: `XADD`, `BSWAP`, `INVLPG`,
+  `WBINVD`, the WP bit in CR0, the AC and ID bits in EFLAGS, `CPUID`, `RDTSC`, `CMPXCHG8B`, `CMOVcc`,
+  and `RDMSR` / `WRMSR` answering with a general protection fault
+- After that the FPU (M5c)
+
+Not looked at: memory use. A run now holds about 270 MB resident, for 128 MB of guest RAM.
