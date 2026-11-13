@@ -657,3 +657,91 @@ What this does not cover:
 - **Memory is still 1 MB** and physical addresses wrap there. test386 stays inside it
 - **Debug registers, the single-step trap, and the resume flag** are not implemented
 - **Hardware interrupts in protected mode** go through the same delivery code but no test raises one
+
+## E010: Where the interpreter's time goes (2026-11-13)
+
+Speed fell from about 105 MIPS (M3) to about 78 (M4a) to about 52 (M4b) with nothing done to win it
+back, and Linux will need on the order of a billion instructions to boot.
+
+Baseline on the release build, median of five runs:
+
+| Benchmark | What it is | Time | Speed |
+|---|---|---:|---:|
+| bench.bin | 369,095,178 instructions, a 10-instruction loop in 16-bit real mode | 6934 ms | about 53 MIPS |
+| test386 | 104,513,187 instructions, mostly 32-bit protected mode with paging | 3160 ms | about 33 MIPS |
+
+- **Hypothesis**: Most of the time is in a few fixed costs paid on every instruction or every memory
+  access, not in the instructions themselves. The candidates, in the order I expect them to matter:
+  (1) copying the whole CPU state at the start of every instruction for a possible fault,
+  (2) fetching code one byte at a time through the limit check and the paging check,
+  (3) writing six flags to memory after every arithmetic instruction,
+  (4) the page-table walk on every access when paging is on (test386 only).
+- **What changed since last time**: Nothing in the code. This card profiles before changing
+  anything, because E002 guessed at a cause and never confirmed it.
+- **Next move for each result**:
+  - The profile shows one of the candidates on top → fix that one first, measure both benchmarks,
+    run the whole suite, then profile again
+  - The profile is flat (no function above about 15%) → the cost is spread through the main
+    dispatch function and a profile by function cannot split it; switch to removing one candidate
+    at a time and measuring the difference
+  - A fix gives less than 5% on both benchmarks → take it out again unless it makes the code simpler
+- **Cut-off**: The same day. The goal is not a number; it is to know what the fixed costs are and to
+  remove the ones that are cheap to remove. Every change must leave `tools/difftest.sh` at 33 of 33.
+
+### Result
+
+2026-11-13. **The hypothesis was half right: the time is in fixed per-instruction costs, but not the
+ones I listed first.** Release build, median of five runs:
+
+| Benchmark | Before | After | Change |
+|---|---:|---:|---:|
+| bench.bin (real mode) | 6934 ms, about 53 MIPS | 5531 ms, about 67 MIPS | 20% less time |
+| test386 (protected mode, paging) | 3160 ms, about 33 MIPS | 1946 ms, about 54 MIPS | 38% less time |
+
+`tools/difftest.sh` is at 33 of 33 after the changes, and test386's output is still byte for byte
+the reference.
+
+What the measurements said, in the order they were taken:
+
+| Step | bench | test386 | Kept |
+|---|---:|---:|---|
+| Baseline | 6934 | 3160 | |
+| Ablation: no state copy per instruction (not correct) | 6829 | - | no: 1.5%. Candidate (1) was wrong |
+| Ablation: arithmetic sets only ZF and CF (not correct) | 6754 | - | no: 2.6%. Lazy flags would not pay; candidate (3) was wrong |
+| Code page cache: translate once per page of code, read bytes directly | 6744 | 2388 | yes |
+| Two-level opcode dispatch | 5866 | 2059 | yes |
+| Big arrays declared last; three tests before the prefix loop | 5423 | 2089 | yes |
+| One-entry caches for data reads and writes | 5559 | 1925 | yes: 8% on test386, within noise on bench |
+
+The profile by function was the flat case the card allowed for: 53% in `exec_one` itself, which a
+function profile cannot split. What broke it open was counting host instructions. A loop of NOPs
+ran at 16 ns per instruction, and `/usr/bin/time -l` reported 104 billion host instructions for 400
+million NOPs: **261 host instructions per NOP**. Stepping one NOP in the debugger and listing what
+ran showed a long straight line of code, no loop, and three causes:
+
+- **Goose compiles an integer `match` to a chain of comparisons**, and clang turns such a chain
+  into a jump table only when the arms are plain values. The opcode `match` had ranges
+  (`0x40..0x48`), so it stayed a chain: an opcode near the end paid for every arm before it.
+  Matching first on `op >> 4` (sixteen plain values, which does become a jump table) and then
+  within the row cut that to a dozen comparisons at most
+- **Every instruction byte went through four calls** (`fetch8`, `lin_read`, `translate`, and a
+  checked division by 8 for the width). Each call that can fault also tests a flag on return
+- **Globals after the 1 MB RAM array were more than a megabyte from the start of the block**, so
+  each access to the CPU state took three instructions instead of one. Goose lays globals out in
+  the order their files are first imported; moving the big arrays to a file imported last put the
+  state near the start
+
+After the changes a NOP costs 209 host instructions in all, 146 of them inside `exec_one`.
+
+What this leaves:
+
+- **The fixed cost is still about 200 host instructions per guest instruction.** What remains is
+  the per-instruction prologue (saving a dozen registers, resetting the decode state, the checks
+  for a pending fault, an interrupt and a BIOS entry), about 58 instructions in the run loop
+  (the state copy, the timer countdown, the trace and script checks), and the opcode body
+- **The lasting fix is not to decode every time.** rustx86 got its speed from a cache of decoded
+  instructions; g86m decodes from bytes on every execution. That is a design change, not a tweak
+- **E002's question is still open**: nothing here tested whether byte writes to RAM make the
+  compiler reload the CPU state
+- The caches were checked by test386 and the two operating systems, but no test changes a page
+  table entry and then relies on the old translation, which is what a cache makes possible

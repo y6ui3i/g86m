@@ -256,8 +256,6 @@ var com_lcr: u8 = 0;         // COM1's line control register
 
 // ---- Port dispatch ----
 
-// Ports nothing answers: counted per port so a run can report what the guest probed.
-var unknown_ports: u8[65536] = [0; 65536];
 
 fn note_unknown(port: u16) {
     if unknown_ports[port] < 255 { unknown_ports[port] += 1; }

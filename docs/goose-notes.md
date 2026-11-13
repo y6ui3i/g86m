@@ -63,7 +63,25 @@ Related: files may import each other in a cycle, but globals are initialized imp
 `var saved: Cpu = cpu;` in the file that the file declaring `cpu` imports was rejected ("may be used
 before it is assigned"). The global went into the file that declares `cpu`.
 
-## 4. Small things
+## 4. What generated code costs: three things that were not obvious
+
+All three were found by counting host instructions for one guest instruction (`/usr/bin/time -l`
+for the total, a debugger stepping one instruction for the detail). See E010 in
+[experiments.md](experiments.md).
+
+- **An integer `match` is a chain of comparisons.** There is no `switch` in the generated C. The C
+  compiler rebuilds a jump table from the chain when every arm is a plain value; a range arm
+  (`0x40..0x48`) stops it. For a big dispatch, match on a few bits first so that level has only
+  plain values, then match within
+- **Globals are laid out in the order their files are first imported**, in one block, and code
+  reaches each by its offset. A large array early in that order pushes everything after it far
+  away, and far offsets cost extra instructions on every access. Names are visible program-wide
+  without an import, so a file of large arrays can be imported once, last, by the root file
+  (`src/big.goose`)
+- **`/` is checked for a zero divisor**, by a call, even when the divisor is the literal 8. Use a
+  shift on hot paths. Mind the precedence when replacing: `a + w >> 3` is not `a + (w >> 3)`
+
+## 5. Small things
 
 - `args`, `write_stderr` and `exit` need `import os;`
 - A variable that holds a string literal is a `const u8[:]`

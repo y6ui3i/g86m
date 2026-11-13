@@ -98,7 +98,7 @@ fn load_seg(s: i64, sel: u16) {
 fn load_cs(sel: u16, at: u32, lo: u32, hi: u32, level: u8) {
     mark_accessed(at, hi);
     set_cache(CS, sel & 0xFFFC | level, lo, hi);
-    cpu.cpl = level;
+    set_cpl(level);
 }
 
 // Checks that a descriptor is a present code segment control may go to from the current level:
@@ -159,7 +159,7 @@ fn io_check(port: u16, w: u8) {
     // Otherwise the task segment's I/O permission bitmap decides: a clear bit allows the port.
     if !tr_32 || tr_limit < 0x67 { raise_gp(0); }
     let map: u32 = sys_read(tr_base + 0x66, 16);
-    for i: u32 in 0..(w as u32) / 8 {
+    for i: u32 in 0..((w as u32) >> 3) {
         let first: u32 = port;
         let p = first + i;
         let at = map + p / 8;
@@ -241,9 +241,9 @@ fn far_call(sel: u16, off: u32, w: u8) {
         let old_ss = cpu.segs[SS];
         let old_sp = sp_get();
         var copied: u32[32] = [0; 32];
-        for i: u32 in 0..params { copied[i] = seg_read(SS, old_sp + i * ((gw as u32) / 8), gw); }
+        for i: u32 in 0..params { copied[i] = seg_read(SS, old_sp + i * (((gw as u32) >> 3)), gw); }
         let nss, nsp = level_stack(level);
-        cpu.cpl = level;
+        set_cpl(level);
         load_inner_ss(nss, level);
         sp_set(nsp);
         push_w(old_ss, gw);
@@ -262,7 +262,7 @@ fn far_call(sel: u16, off: u32, w: u8) {
 
 // RETF: pops the return address and then `extra` bytes of parameters.
 fn far_ret(w: u8, extra: u32) {
-    let n: u32 = (w as u32) / 8;
+    let n: u32 = ((w as u32) >> 3);
     if !protected() || v86() {
         let ip = pop_w(w);
         let cs = pop_w(w) as! u16;
@@ -349,7 +349,7 @@ fn deliver(vec: u8, soft: bool, has_err: bool, err: u32) {
         let old_sp = sp_get();
         let nss, nsp = level_stack(level);
         cpu.flags &= ~VM;                // from here on segment registers load the protected way
-        cpu.cpl = level;
+        set_cpl(level);
         load_inner_ss(nss, level);
         sp_set(nsp);
         if from_v86 {
@@ -376,7 +376,7 @@ fn deliver(vec: u8, soft: bool, has_err: bool, err: u32) {
 
 // IRET.
 fn do_iret(w: u8) {
-    let n: u32 = (w as u32) / 8;
+    let n: u32 = ((w as u32) >> 3);
     if !protected() || v86() {
         if v86() && iopl() < 3 { raise_gp(0); }
         let ip = pop_w(w);
@@ -403,7 +403,7 @@ fn do_iret(w: u8) {
         let fs = seg_read(SS, sp + 28, 32) as! u16;
         let gs = seg_read(SS, sp + 32, 32) as! u16;
         write_flags(fl, 0x37FD5);
-        cpu.cpl = 3;
+        set_cpl(3);
         v86_seg(CS, sel);
         v86_seg(SS, nss);
         v86_seg(ES, es);

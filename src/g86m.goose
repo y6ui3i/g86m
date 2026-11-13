@@ -31,6 +31,7 @@ import exec;
 import bios;
 import dev;
 import console;
+import big;         // last on purpose: see big.goose
 
 var trace_buf: u8[>..];
 let HEX = "0123456789ABCDEF";
