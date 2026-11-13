@@ -1,10 +1,19 @@
-// Arithmetic and flags. Values travel as u32 and are cut to the width w (8 or 16).
+// Arithmetic and flags. Values travel as u32 and are cut to the width w (8, 16 or 32).
 // Undefined flags follow rustx86, which matches expected values taken from a real 386.
 
 import state;
 
-fn mask(w: u8) -> u32 { if w == 8 { return 0xFF; } return 0xFFFF; }
-fn msb(w: u8) -> u32 { if w == 8 { return 0x80; } return 0x8000; }
+fn mask(w: u8) -> u32 {
+    if w == 8 { return 0xFF; }
+    if w == 16 { return 0xFFFF; }
+    return 0xFFFFFFFF;
+}
+
+fn msb(w: u8) -> u32 {
+    if w == 8 { return 0x80; }
+    if w == 16 { return 0x8000; }
+    return 0x80000000;
+}
 
 fn parity8(v: u32) -> bool {
     var x = v & 0xFF;
@@ -22,28 +31,34 @@ fn set_szp(r: u32, w: u8) {
 
 // Sign-extends to i64, for multiply and divide.
 fn sx(v: u32, w: u8) -> i64 {
-    if v & msb(w) != 0 { return (v as i64) - mask(w) - 1; }
-    return v;
+    let wide: i64 = v & mask(w);
+    let top: i64 = msb(w);
+    if wide >= top { return wide - top - top; }
+    return wide;
 }
 
 // op is the 3-bit field from the instruction: 0 ADD 1 OR 2 ADC 3 SBB 4 AND 5 SUB 6 XOR 7 CMP
 fn alu(op: u8, a: u32, b: u32, w: u8) -> u32 {
     let m = mask(w);
     let s = msb(w);
+    // The carry out of a 32-bit add does not fit in u32, so carries are worked out in u64.
+    let a64: u64 = a;
+    let b64: u64 = b;
+    let m64: u64 = m;
     var r: u32 = 0;
     match op {
         0, 2 => {
-            let c: u32 = if op == 2 && flag(CF) { 1 } else { 0 };
-            let full = a + b + c;
-            r = full & m;
-            set_flag(CF, full > m);
+            let c: u64 = if op == 2 && flag(CF) { 1 } else { 0 };
+            let full = a64 + b64 + c;
+            r = (full & m64) as! u32;
+            set_flag(CF, full > m64);
             set_flag(OF, (a ^ r) & (b ^ r) & s != 0);
             set_flag(AF, (a ^ b ^ r) & 0x10 != 0);
         },
         3, 5, 7 => {
-            let c: u32 = if op == 3 && flag(CF) { 1 } else { 0 };
-            r = (a - b - c) & m;
-            set_flag(CF, a < b + c);
+            let c: u64 = if op == 3 && flag(CF) { 1 } else { 0 };
+            r = ((a64 - b64 - c) & m64) as! u32;
+            set_flag(CF, a64 < b64 + c);
             set_flag(OF, (a ^ b) & (a ^ r) & s != 0);
             set_flag(AF, (a ^ b ^ r) & 0x10 != 0);
         },
@@ -109,4 +124,30 @@ fn shift(kind: u8, v0: u32, count: u8, w: u8) -> u32 {
     }
     if kind >= 4 { set_szp(v, w); }
     return v;
+}
+
+// SHLD (left = true) and SHRD: shifts dst by count bits, filling from src.
+fn shift_double(left: bool, dst0: u32, src0: u32, count: u8, w: u8) -> u32 {
+    let m = mask(w);
+    let s = msb(w);
+    let n: i64 = count & 0x1F;
+    if n == 0 { return dst0; }
+    var dst = dst0 & m;
+    var src = src0 & m;
+    var cf = false;
+    for i in n {
+        if left {
+            cf = dst & s != 0;
+            dst = (dst << 1 | (if src & s != 0 { 1 } else { 0 })) & m;
+            src = src << 1 & m;
+        } else {
+            cf = dst & 1 != 0;
+            dst = dst >> 1 | (if src & 1 != 0 { s } else { 0 });
+            src = src >> 1;
+        }
+    }
+    // OF and AF are left as they were, which is what a real 386 does (rustx86, from test386).
+    set_flag(CF, cf);
+    set_szp(dst, w);
+    return dst;
 }

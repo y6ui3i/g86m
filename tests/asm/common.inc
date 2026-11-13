@@ -1,7 +1,12 @@
 ; Shared opening for every test. Interrupts stay disabled: a timer interrupt would shift the trace.
 org 0x7C00
 bits 16
+; The 16-bit tests are held to 186 instructions; a test that defines CPU386 first may use the 386's.
+%ifdef CPU386
+cpu 386
+%else
 cpu 186
+%endif
 ; The backward branch of a table loop is over 127 bytes, so invert the condition and go back with a near JMP.
 %macro LOOP_BELOW 1
     jnb  %%done

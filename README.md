@@ -9,9 +9,11 @@ its per-instruction trace is compared with g86m's.
 
 ## Status
 
-M3 is done: FreeDOS 1.4 boots from its floppy to the `A:\>` prompt, and ELKS 0.9.1 (M2) boots to
-its shell. Both can be used by hand in the terminal console, or driven by a script.
-The M1 instruction tests (eleven of them) still match rustx86 line for line on the state at every
+M4 is under way. Its first part is done: g86m is now a 386 in real mode, with 32-bit registers,
+the operand- and address-size prefixes, 32-bit addressing and the 386's new instructions. Protected
+mode and paging are next. FreeDOS 1.4 (M3) and ELKS 0.9.1 (M2) boot and can be used by hand in the
+terminal console, or driven by a script.
+Seventeen instruction tests match rustx86 line for line on the full 32-bit state at every
 instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
 [docs/goose-notes.md](docs/goose-notes.md).
@@ -25,7 +27,7 @@ How the first day went is written up in a blog post (in Japanese):
 | M1 | The 16-bit real-mode instruction set; a boot sector prints Hello, World | done |
 | M2 | The ELKS shell | done |
 | M3 | FreeDOS to the `A:\>` prompt | done (the installer was declined, not run) |
-| M4 | 386 protected mode and paging; pass test386 | not started |
+| M4 | 386 protected mode and paging; pass test386 | in progress: the 386 instruction set in real mode is done |
 | M5 | 32-bit Linux and busybox | not started |
 
 ## Technology choices
@@ -96,9 +98,9 @@ console through a pseudo-terminal ([tools/console_test.py](tools/console_test.py
 image is missing is reported as skipped.
 
 It assembles one boot sector per instruction group (`tests/asm/`) with NASM, runs each, and compares
-the trace with the expected one in `tests/expected/`. The expected traces come from trace16
-([tools/oracle/trace16.rs](tools/oracle/trace16.rs)), a small example added to rustx86.
-To regenerate them, run `ORACLE=/path/to/trace16 tools/difftest.sh`.
+the trace with the expected one in `tests/expected/`. The expected traces come from trace32
+([tools/oracle/trace32.rs](tools/oracle/trace32.rs)), a small example added to rustx86.
+To regenerate them, run `ORACLE=/path/to/trace32 tools/difftest.sh`.
 
 ## Layout
 

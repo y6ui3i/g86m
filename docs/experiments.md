@@ -485,3 +485,86 @@ What this does not settle:
 - PUSH SP is now the 8086 behaviour on purpose. M4 has to turn it back when the machine becomes a
   386, together with the FLAGS bits, or the same inconsistency returns the other way round
 - The installer was declined. Going on with `y` was not tried
+
+## E008: Make the machine a 386 in real mode (M4a, 2026-11-13)
+
+M4 is split in three: (a) the 386 instruction set in real mode, (b) protected mode, (c) paging and
+test386. This card is (a).
+
+- **Hypothesis**: With 32-bit registers, the 66h/67h prefixes, 32-bit addressing with SIB bytes, FS
+  and GS, and the 0Fh instructions, g86m matches rustx86's 32-bit profile line for line on the full
+  32-bit state (EIP, the eight 32-bit registers, six segment registers, EFLAGS) for the existing
+  eight 16-bit test programs and for new 32-bit ones. ELKS and FreeDOS still boot, and FreeDOS's
+  normal startup, which now sees a 386 and takes its 32-bit path, still reaches the installer.
+- **What changed since last time**: Until now g86m was an 8086 to software that asked (E007). It
+  becomes a 386 without an FPU and without CPUID: FLAGS bits 12–14 are writable, PUSH SP pushes
+  the value from before the decrement, and the 386 instructions exist. The oracle changes with it,
+  from rustx86's default 8086 profile to its 32-bit profile, and the trace gains the upper halves
+  of the registers. The expected traces are all regenerated.
+- **Next move for each result**:
+  - Every trace matches and both systems boot → open a PR, go on to protected mode (M4b)
+  - A trace differs → fix the first line that differs. rustx86's 32-bit profile has an FPU and
+    CPUID and g86m does not, so a difference in FPU instructions, CPUID, or the AC and ID bits of
+    EFLAGS is expected: keep those out of the trace tests rather than following the oracle
+  - FreeDOS stops on an instruction → implement it if it is a 386 instruction; if it is a 486 or
+    later one, find out which CPU test said so
+  - ELKS or FreeDOS behaves differently as a 386 without stopping → compare the screen with the
+    8086 run and record what changed
+- **Cut-off**: The same day for the instruction set. Entering protected mode stops the machine with
+  a message; that is M4b.
+
+### Result
+
+2026-11-13. **Every trace matches and both systems boot. Next move: open a PR, then protected mode (M4b).**
+
+`tools/difftest.sh` has 31 checks and all pass on the debug and release builds.
+
+| Test | Lines | Contents |
+|---|---:|---|
+| The eleven 16-bit traces from M1 | as before | Regenerated on the 32-bit oracle; they matched on the first run, before any 32-bit test existed |
+| u_alu | 590 | The 8 operations and TEST on 32-bit registers, memory and immediates; INC / DEC / NEG / NOT |
+| u_shift | 1393 | 32-bit rotates and shifts; SHLD / SHRD at 16 and 32 bits × 11 counts |
+| u_muldiv | 328 | 32-bit MUL / IMUL / DIV / IDIV with divide errors; two- and three-operand IMUL; CWDE / CDQ |
+| u_addr | 75 | Every ModR/M and SIB shape through LEA; default segments of the 32-bit forms |
+| u_misc | 365 | MOVZX / MOVSX, 16 SETcc × 10 flag words, near Jcc, BT / BTS / BTR / BTC, BSF / BSR, FS / GS, LSS / LFS / LGS |
+| u_stack | 114 | PUSHAD / POPAD, PUSHFD / POPFD, 32-bit ENTER / LEAVE, string instructions with either size prefix, LOOP / JECXZ by address size, 32-bit CALL / RET, XLAT, SMSW, SIDT |
+| s_386 | - | Self-check for three cases where g86m follows the Intel manual and rustx86 does not |
+
+ELKS and FreeDOS need no change to their scripts: the ELKS shell session, FreeDOS's normal startup,
+the F5 path and all four console sessions pass as before. FreeDOS's normal startup now runs the code
+that stopped g86m in E007 (PUSHFD and friends) instead of avoiding it.
+
+Of the six new tests, three matched on the first run (u_alu, u_addr, u_muldiv). The other three:
+
+| Mismatch | Cause | Fixed in |
+|---|---|---|
+| OF after SHLD / SHRD | A real 386 leaves OF alone; g86m set it on a count of 1 | g86m |
+| EBP after a 32-bit ENTER | With a 16-bit stack the frame pointer is BP: only the low half of EBP is written | g86m |
+| CR0 read by SMSW | g86m started CR0 with the ET bit set; with no coprocessor it is clear | g86m |
+
+The tests had one bug: `o32 call label` in NASM adds the prefix but keeps a 16-bit displacement, so
+the call went into data. `call dword label` is the form that works.
+
+Where g86m and rustx86 disagree and g86m was not changed (all three are in `s_386` instead of a
+trace, and listed in [goose-notes.md](goose-notes.md)):
+
+- BT-family instructions with an immediate bit offset above the operand size, on memory
+- BT-family instructions with a negative 16-bit register bit offset
+- IRETD in real mode
+
+Speed: bench.bin takes 4613–4764 ms on the release build = **about 78 MIPS**, down from about 105.
+Every instruction now resets and tests the operand and address sizes, and register and memory
+access go through a width that can be 8, 16 or 32.
+
+What was not done:
+
+- **The screens were not compared.** The card said to compare ELKS's and FreeDOS's screens as a 386
+  against the 8086 run. Only the scripted waits were checked; they pass, but a message that changed
+  would not be noticed
+- **No CPUID and no FPU.** rustx86's 32-bit profile has both; g86m answers as a 386
+  without them, so instructions that touch them are kept out of the traces
+- **Real mode is not checked for limits.** Offsets above FFFFh and a 32-bit EIP do not fault
+- **Protected mode stops the machine.** Setting CR0.PE by MOV CR0 or LMSW prints a message and
+  stops. LGDT and LIDT only store their operand
+- **Instructions in the two-byte range that no test reaches**: MOV to and from debug registers, CLTS,
+  INS / OUTS

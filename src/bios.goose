@@ -209,7 +209,7 @@ fn int13() {
             set_r8(1, disk_spt as! u8);
             set_r8(6, (disk_heads - 1) as! u8);
             set_r8(2, 1);                                        // one drive
-            cpu.segs[ES] = BIOS_SEG;
+            set_seg(ES, BIOS_SEG);
             set_r16(DI, 0x1E);
             ret_carry(false);
         },
