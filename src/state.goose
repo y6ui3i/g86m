@@ -133,6 +133,12 @@ fn raise_np(err: u32) { raise(11, true, err); }          // segment not present
 // end of memory nothing answers: reads give FFh and writes are dropped.
 var phys_mask: u32 = 0xFFFFF;
 
+// The CPU's generation follows the machine too. False: a 386 with no CPUID, for the 16-bit
+// machine. True: an i686, for the 32-bit one: the instructions the 486, Pentium and P6 added,
+// CPUID, and the AC and ID bits in EFLAGS. Software reads these signs and takes different paths,
+// so they have to agree with each other and stay as they were for what already boots.
+var i686 = false;
+
 fn mem8(a: u32) -> u8 {
     let p = a & phys_mask;
     if p < RAM_SIZE { return ram[p]; }
@@ -191,7 +197,10 @@ fn translate(a: u32, write: bool, user: bool) -> u32 {
     let pte_at = (pde & 0xFFFFF000) + (a >> 12 & 0x3FF) * 4;
     let pte = mem32(pte_at);
     if pte & 1 == 0 { cr[2] = a; raise(14, true, code); }
-    if user && (pde & pte & 4 == 0 || (write && pde & pte & 2 == 0)) { cr[2] = a; raise(14, true, code | 1); }
+    if user && pde & pte & 4 == 0 { cr[2] = a; raise(14, true, code | 1); }
+    // A write needs the writable bit in user mode, and in supervisor mode too once CR0.WP is set
+    // (a 486 feature; the kernel's copy-on-write depends on it).
+    if write && pde & pte & 2 == 0 && (user || cr[0] & 0x10000 != 0) { cr[2] = a; raise(14, true, code | 1); }
     if pde & 0x20 == 0 { set_mem32(pde_at, pde | 0x20); }
     let want: u32 = if write { 0x60 } else { 0x20 };
     if pte & want != want { set_mem32(pte_at, pte | want); }
@@ -345,11 +354,14 @@ fn set_flag(mask: u32, on: bool) {
     if on { cpu.flags |= mask; } else { cpu.flags &= ~mask; }
 }
 
-// Writes the bits of v that mask allows into EFLAGS. The machine is a 386: nothing above the VM
-// bit exists (no AC bit, so not a 486; no ID bit, so no CPUID), and bit 1 always reads as one.
+// Writes the bits of v that mask allows into EFLAGS. On the 386 nothing above the VM bit exists
+// (no AC bit, so not a 486; no ID bit, so no CPUID); the i686 has both. Bit 1 always reads as one.
 // Software tells CPU generations apart by exactly these bits.
+let AC = 0x40000;
+let ID = 0x200000;
+
 fn write_flags(v: u32, mask: u32) {
-    let m = mask & 0x00037FD5;
+    let m = mask & (if i686 { 0x00277FD5 } else { 0x00037FD5 });
     cpu.flags = cpu.flags & ~m | v & m | 2;
 }
 

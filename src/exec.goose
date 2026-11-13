@@ -513,6 +513,11 @@ fn two_byte() {
                             cr[0] = cr[0] & 0xFFFFFFF1 | rm_read(16) & 0x0F;
                             flush_tlb();
                         },
+                        7 => {                                       // INVLPG
+                            if !i686 || m_mod == 3 { fault(6); }
+                            need_ring0();
+                            flush_tlb();
+                        },
                         _ => { fault(6); },
                     }
                 },
@@ -546,7 +551,15 @@ fn two_byte() {
                     }
                 },
                 0x06 => { need_ring0(); cr[0] &= 0xFFFFFFF7; },      // CLTS
+                0x08, 0x09 => { if !i686 { fault(6); } need_ring0(); },                  // INVD, WBINVD: no cache
                 0x0B => { fault(6); },                               // UD2
+                _ => { cpu.ip = saved.ip; stop("unimplemented opcode 0F", op); },
+            }
+        },
+        0x1 => {
+            match op {
+                // The long NOP (0F 1F) and the prefetch hints (0F 18): an operand, and no effect.
+                0x18, 0x1F => { if !i686 { fault(6); } decode_modrm(); },
                 _ => { cpu.ip = saved.ip; stop("unimplemented opcode 0F", op); },
             }
         },
@@ -567,9 +580,24 @@ fn two_byte() {
         0x3 => {
             match op {
                 // Instructions from the 486 on (CPUID, CMPXCHG, XADD, BSWAP, RDTSC ...) are invalid here.
-                0x31 => { fault(6); },                               // RDTSC
+                0x30, 0x32 => {                                      // WRMSR, RDMSR: no model-specific registers
+                    if !i686 { fault(6); }
+                    raise_gp(0);
+                },
+                0x31 => {                                            // RDTSC: the instruction count
+                    if !i686 { fault(6); }
+                    set_r32(AX, vtime as! u32);
+                    set_r32(DX, (vtime >> 32) as! u32);
+                },
                 _ => { cpu.ip = saved.ip; stop("unimplemented opcode 0F", op); },
             }
+        },
+        0x4 => {
+            // CMOVcc: a move that happens only if the condition holds. The source is read either way.
+            if !i686 { fault(6); }
+            decode_modrm();
+            let v = rm_read(osz);
+            if cond(op & 0x0F) { set_regw(m_reg, osz, v); }
         },
         0x8 => {
             match op {
@@ -608,7 +636,25 @@ fn two_byte() {
                     let p = imul(regw(m_reg, osz), rm_read(osz), osz);
                     set_regw(m_reg, osz, p as! u32);
                 },
-                0xA2 => { fault(6); },                               // CPUID
+                0xA2 => {                                            // CPUID
+                    if !i686 { fault(6); }
+                    let leaf = r32(AX);
+                    set_r32(AX, 0);
+                    set_r32(BX, 0);
+                    set_r32(CX, 0);
+                    set_r32(DX, 0);
+                    if leaf == 0 {
+                        set_r32(AX, 1);                              // the highest leaf
+                        set_r32(BX, 0x756E6547);                     // "GenuineIntel"
+                        set_r32(DX, 0x49656E69);
+                        set_r32(CX, 0x6C65746E);
+                    } else if leaf == 1 {
+                        // Family 6, the P6. Only what is implemented is claimed: the timestamp
+                        // counter, CMPXCHG8B and CMOV. No FPU yet.
+                        set_r32(AX, 0x0633);
+                        set_r32(DX, 1 << 4 | 1 << 8 | 1 << 15);
+                    }
+                },
                 _ => { cpu.ip = saved.ip; stop("unimplemented opcode 0F", op); },
             }
         },
@@ -642,13 +688,51 @@ fn two_byte() {
                         set_regw(m_reg, osz, i);
                     }
                 },
-                0xB0, 0xB1 => { fault(6); },                         // CMPXCHG
+                0xB0, 0xB1 => {                                      // CMPXCHG
+                    if !i686 { fault(6); }
+                    let w = width(op);
+                    decode_modrm();
+                    let dst = rm_read(w);
+                    let acc = regw(AX, w);
+                    alu(7, acc, dst, w);
+                    if acc == dst { rm_write(w, regw(m_reg, w)); } else { set_regw(AX, w, dst); }
+                },
                 _ => { cpu.ip = saved.ip; stop("unimplemented opcode 0F", op); },
             }
         },
         0xC => {
             match op {
-                0xC0, 0xC1, 0xC8..0xD0 => { fault(6); },             // XADD, BSWAP
+                0xC0, 0xC1 => {                                      // XADD
+                    if !i686 { fault(6); }
+                    let w = width(op);
+                    decode_modrm();
+                    let dst = rm_read(w);
+                    let src = regw(m_reg, w);
+                    let sum = alu(0, dst, src, w);
+                    set_regw(m_reg, w, dst);
+                    rm_write(w, sum);
+                },
+                0xC7 => {                                            // CMPXCHG8B
+                    if !i686 { fault(6); }
+                    decode_modrm();
+                    if m_mod == 3 || m_reg != 1 { fault(6); }
+                    let lo = seg_read(ea_seg, ea_off, 32);
+                    let hi = seg_read(ea_seg, ea_off + 4, 32);
+                    if lo == r32(AX) && hi == r32(DX) {
+                        seg_write(ea_seg, ea_off, 32, r32(BX));
+                        seg_write(ea_seg, ea_off + 4, 32, r32(CX));
+                        set_flag(ZF, true);
+                    } else {
+                        set_r32(AX, lo);
+                        set_r32(DX, hi);
+                        set_flag(ZF, false);
+                    }
+                },
+                0xC8..0xD0 => {                                      // BSWAP
+                    if !i686 { fault(6); }
+                    let v = r32(op);
+                    set_r32(op, v >> 24 | v >> 8 & 0xFF00 | (v & 0xFF00) << 8 | v << 24);
+                },
                 _ => { cpu.ip = saved.ip; stop("unimplemented opcode 0F", op); },
             }
         },
@@ -674,6 +758,8 @@ fn lockable(op: u8) -> bool {
     let r = m >> 3 & 7;
     if two {
         if code == 0xAB || code == 0xB3 || code == 0xBB { return true; }
+        if i686 && (code == 0xB0 || code == 0xB1 || code == 0xC0 || code == 0xC1) { return true; }      // CMPXCHG, XADD
+        if i686 && code == 0xC7 { return r == 1; }                                                      // CMPXCHG8B
         return code == 0xBA && r >= 5;
     }
     if code < 0x38 && code & 7 < 2 { return true; }
@@ -931,6 +1017,7 @@ fn exec_one() -> bool {
                     if v86() { io_sensitive(); }
                     // IF changes only if the level may do I/O; IOPL only at level 0 (always, in real mode).
                     var m: u32 = 0x4DD5;
+                    if osz == 32 { m |= AC | ID; }
                     if !protected() || cpu.cpl == 0 { m |= IOPL; }
                     if !protected() || (if v86() { iopl() == 3 } else { cpu.cpl <= iopl() }) { m |= IF; }
                     write_flags(popv(), m);

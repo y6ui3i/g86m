@@ -102,9 +102,9 @@ fn pic_data(k: i64, v: u8) {
 // ---- Timer (8254) ----
 //
 // The virtual clock is the instruction count: the timer's 1,193,182 Hz input advances one tick
-// every TICK_INSNS instructions. Only channel 0 raises an interrupt.
+// every tick_insns instructions. Only channel 0 raises an interrupt.
 
-let TICK_INSNS = 4;
+var tick_insns = 4;          // 64 for the 32-bit machine, as rustx86 has it
 
 struct Channel {
     reload: u32,     // 0 means 65536
@@ -126,7 +126,7 @@ var timer_left = 262144;     // instructions until channel 0 next reaches zero
 
 fn pit_period() -> i64 {
     let n: i64 = if pit[0].reload == 0 { 65536 } else { pit[0].reload };
-    return n * TICK_INSNS;
+    return n * tick_insns;
 }
 
 // Channel 0 reached zero.
@@ -136,8 +136,29 @@ fn timer_fire() {
     if pit[0].mode != 2 && pit[0].mode != 3 { timer_on = false; }     // one-shot modes stop
 }
 
+// Channel 2 drives the speaker and is also what software times short intervals with: it loads a
+// count, opens the gate at port 61h, and watches the channel's output there. Its count is worked
+// out from the virtual time at which it was loaded.
+var ch2_loaded_at = 0;
+
+// Timer ticks since channel 2 was loaded.
+fn ch2_elapsed() -> i64 { return (vtime - ch2_loaded_at) / tick_insns; }
+
+// Channel 2's output pin: in mode 0 it goes high once the count has run out.
+fn ch2_out() -> bool {
+    let n: i64 = if pit[2].reload == 0 { 65536 } else { pit[2].reload };
+    if pit[2].mode == 0 { return ch2_elapsed() >= n; }
+    return ch2_elapsed() % n < n / 2;          // a square wave in the other modes
+}
+
 fn pit_count(k: i64) -> u16 {
-    if k == 0 { return (timer_left / TICK_INSNS) as! u16; }
+    if k == 0 { return (timer_left / tick_insns) as! u16; }
+    if k == 2 {
+        let n: i64 = if pit[2].reload == 0 { 65536 } else { pit[2].reload };
+        let gone = ch2_elapsed();
+        if pit[2].mode == 0 { return (if gone >= n { 0 } else { n - gone }) as! u16; }
+        return (n - gone % n) as! u16;
+    }
     return pit[k].reload as! u16;
 }
 
@@ -171,6 +192,7 @@ fn pit_write(k: i64, v: u8) {
         pit[k].reload = v;
     }
     if k == 0 { timer_on = true; timer_left = pit_period(); }
+    if k == 2 { ch2_loaded_at = vtime; }
 }
 
 fn pit_read(k: i64) -> u8 {
@@ -198,6 +220,7 @@ var kbd_full = false;
 var kbd_command: u8 = 0;     // controller command waiting for its data byte, or 0
 var kbd_config: u8 = 0x45;   // command byte: interrupt on, system flag, translation
 var port_b: u8 = 0;          // port 61h (speaker gate and friends)
+var refresh: u8 = 0;
 
 // Moves the next queued byte into the output buffer and raises IRQ 1.
 fn kbd_pump() {
@@ -364,7 +387,12 @@ fn port_in8(port: u16) -> u8 {
         0xA1 => { return pic[1].imr; },
         0x40..0x43 => { return pit_read(port - 0x40); },
         0x60 => { return kbd_read_data(); },
-        0x61 => { return port_b; },
+        0x61 => {
+            // Bits 0-3 read back as written; bit 4 toggles on every read (the refresh signal
+            // of the original PC); bit 5 is timer channel 2's output.
+            refresh ^= 0x10;
+            return port_b & 0x0F | refresh | (if ch2_out() { 0x20 } else { 0 });
+        },
         0x64 => { return if kbd_full { 0x1D } else { 0x1C }; },
         0x3D4 => { return crtc_index; },
         0x3D5 => { return crtc[crtc_index & 31]; },

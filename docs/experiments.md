@@ -809,3 +809,69 @@ What this leaves for the CPU step (M5b), from rustx86's record and this run:
 - After that the FPU (M5c)
 
 Not looked at: memory use. A run now holds about 270 MB resident, for 128 MB of guest RAM.
+
+## E012: Make the 32-bit machine an i686, and see what the kernel wants next (M5b, 2026-11-13)
+
+- **Hypothesis**: With the instructions the 486, the Pentium and the P6 added (`CMPXCHG`, `XADD`,
+  `BSWAP`, `INVLPG`, `WBINVD`, `CPUID`, `RDTSC`, `CMPXCHG8B`, `CMOVcc`, the long NOP), the WP bit
+  in CR0, the AC and ID bits in EFLAGS, and `RDMSR` / `WRMSR` answering with a general protection
+  fault, the kernel gets past `LOCK CMPXCHG`, sets up its serial console, and prints. It then
+  stops for want of an FPU, and says so.
+- **What changed since last time**: E011's machine was a 386. The identity now depends on what is
+  booted: a Linux kernel gets an i686 (CPUID family 6, with TSC, CX8 and CMOV, and not yet FPU);
+  boot sectors, floppies and ROMs keep the 386, so that FreeDOS and ELKS see what they saw
+  before (E007 is what happens when the answers to CPU tests do not agree). The 32-bit machine
+  also runs its timer at 64 instructions per tick, rustx86's ratio, instead of 4.
+- **Next move for each result**:
+  - The kernel prints and stops asking for an FPU → open a PR; the FPU is the next step (M5c)
+  - It stops on another instruction → add it if it belongs to these CPU generations, and note it
+  - It prints but then hangs or panics for a reason that is not the FPU → read the message; if it
+    is about time (calibration, a clock source), look at the timer ratio and the TSC first
+  - Output looks wrong (garbled, repeated) → the serial port's interrupts; check with rustx86's
+    output for the same kernel
+- **Cut-off**: The same day. The new instructions get trace or self-check tests before the PR,
+  whatever the kernel does.
+
+### Result
+
+2026-11-13. **The hypothesis held. The kernel prints its log on the serial console and stops for
+want of an FPU, saying so.**
+
+```
+[    0.000000] Linux version 6.18.35-0-lts (buildozer@build-3-24-x86) (cc (Alpine 15.2.0) 15.2.0, ...
+[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x0000000007ffffff] usable
+[    0.000000] 128MB LOWMEM available.
+[    0.000000] Checking if this processor honours the WP bit even in supervisor mode...Ok.
+[    0.000000] printk: legacy console [ttyS0] enabled
+[    2.756672] APIC: Keep in PIC mode(8259)
+[    2.757181] Calibrating delay loop (skipped), value calculated using timer frequency.. 152.72 BogoMIPS (lpj=76362)
+[    2.760411] x86/fpu: Giving up, no FPU found and no math emulation present
+```
+
+About a hundred lines of kernel log come out before it gives up. `tools/difftest.sh` now has 37
+checks, all passing: a trace test for the new instructions (`v_686`, 386 lines, matched rustx86 on
+the first run), a self-check for what the i686 says about itself (`s_686`), CPUID being an invalid
+opcode on the 386 (added to `s_386`), and the kernel reaching its version line.
+
+It stopped once on the way, and not where the card expected:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The log stopped after `APIC: Keep in PIC mode(8259)` and the kernel ran on to the instruction limit | It was calibrating the TSC against timer channel 2: it loads a count, then polls port 61h for the channel's output bit. g86m had no channel 2 and that bit never came on | Channel 2 counts from the virtual time it was loaded at; port 61h reports its output |
+
+The card's guess for a hang was "the timer ratio and the TSC", which pointed at the right
+neighbourhood; the listing of what the kernel does at that point (from its source, `pit_calibrate_tsc`)
+named the port.
+
+What the log shows that is not right yet, none of it stopping the boot:
+
+- `unchecked MSR access error: WRMSR to 0x8b` and `RDMSR from 0x8b`, twice, with call traces: the
+  microcode-revision probe. g86m answers with a general protection fault, as rustx86 does; the
+  kernel reports it and carries on
+- `x86 CPU feature dependency check failure: CPU0 has 'cmov' enabled but 'fxsr' disabled`: the
+  feature set claimed (TSC, CX8, CMOV) is not one any real CPU had
+- `tsc: Fast TSC calibration failed`: expected; the slow method then works
+- `Unable to read current time from RTC`: there is no CMOS clock
+
+Not done: nothing here measures whether the instructions run correctly inside the kernel beyond
+the kernel's own behaviour. `v_686` covers them in real mode only.

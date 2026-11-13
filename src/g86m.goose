@@ -22,6 +22,7 @@
 //   --ports        report the I/O ports the guest used that nothing answered, and how often
 //                  each BIOS service was called
 //   --headless     never open the interactive console
+//   --cpu KIND     386 or i686: the CPU, instead of the one that goes with the image
 //   --faults       report every fault except page faults on standard error
 //   --dump FILE    write the first 1 MB of guest memory to FILE when the run ends
 //   --com FILE     write what the guest sent to COM1 to FILE when the run ends
@@ -191,14 +192,14 @@ fn run_until(limit: i64) -> i64 {
     return RUN_BUDGET;
 }
 
-// The virtual CPU runs TICK_INSNS instructions per timer tick, and the timer ticks 1,193,182
+// The virtual CPU runs tick_insns instructions per timer tick, and the timer ticks 1,193,182
 // times a second, so this many instructions are one second of guest time.
-let INSNS_PER_SECOND = 1193182 * TICK_INSNS;
+fn insns_per_second() -> i64 { return 1193182 * tick_insns; }
 
 // The interactive console: run a hundredth of a second of guest time, exchange keys and screen
 // with the terminal, then sleep until real time has caught up. Returns how the machine ended.
 fn run_console(max: i64) -> i64 {
-    let slice = INSNS_PER_SECOND / 100;
+    let slice = insns_per_second() / 100;
     var t0 = clock_ns();
     var v0 = vtime;
     var result = RUN_BUDGET;
@@ -207,7 +208,7 @@ fn run_console(max: i64) -> i64 {
         guard console_keys() else { break; }
         console_render();
         guard result == RUN_BUDGET else { break; }
-        let guest_ns = (vtime - v0) * 1000000000 / INSNS_PER_SECOND;
+        let guest_ns = (vtime - v0) * 1000000000 / insns_per_second();
         let ahead = guest_ns - (clock_ns() - t0);
         if ahead > 0 {
             let nap = if ahead > 50000000 { 50000000 } else { ahead };
@@ -228,6 +229,7 @@ fn main() {
     var headless = false;
     var dump_arg = 0;
     var com_arg = 0;
+    var cpu_arg = 0;
     var initrd_arg = 0;
     var append_arg = 0;
     var max = 20000000000;
@@ -244,6 +246,7 @@ fn main() {
         else if a[i] == "--screen" { show_screen = true; }
         else if a[i] == "--ports" { show_ports = true; }
         else if a[i] == "--headless" { headless = true; }
+        else if a[i] == "--cpu" && i + 1 < a.len { i++; cpu_arg = i; }
         else if a[i] == "--faults" { log_faults = true; }
         else if a[i] == "--dump" && i + 1 < a.len { i++; dump_arg = i; }
         else if a[i] == "--com" && i + 1 < a.len { i++; com_arg = i; }
@@ -282,6 +285,8 @@ fn main() {
         pic[0].imr = 0xFF;
         timer_on = false;
         com_live = true;
+        i686 = true;
+        tick_insns = 64;
     } else if rom {
         // The ROM ends at the top of the first megabyte. A CPU starts at the reset vector.
         for b, k in img { ram[0x100000 - img.len + k] = b; }
@@ -306,6 +311,11 @@ fn main() {
             guard disk_geometry() else { write_stderr("g86m: the image is not a floppy size\n"); exit(2); }
             set_r16(DX, 0x0000);             // DL = drive A
         }
+    }
+
+    if cpu_arg > 0 {
+        guard a[cpu_arg] == "386" || a[cpu_arg] == "i686" else { write_stderr("g86m: --cpu takes 386 or i686\n"); exit(2); }
+        i686 = a[cpu_arg] == "i686";
     }
 
     scripted = step_kind.len > 0;

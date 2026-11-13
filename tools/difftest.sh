@@ -17,22 +17,24 @@ mkdir -p build tests/expected
 "$GOOSE" build -o build/g86m src/g86m.goose >/dev/null || exit 2
 
 fail=0
-for asm in tests/asm/t_*.asm tests/asm/u_*.asm tests/asm/s_*.asm; do
+for asm in tests/asm/t_*.asm tests/asm/u_*.asm tests/asm/v_*.asm tests/asm/s_*.asm; do
     name=$(basename "$asm" .asm)
     nasm -w-other -I tests/asm/ -f bin -o "build/$name.bin" "$asm" || exit 2
 done
 cp testdata/hello.bin testdata/interrupt.bin testdata/vram.bin build/
 
-for bin in build/t_*.bin build/u_*.bin build/hello.bin build/interrupt.bin build/vram.bin; do
+for bin in build/t_*.bin build/u_*.bin build/v_*.bin build/hello.bin build/interrupt.bin build/vram.bin; do
     name=$(basename "$bin" .bin)
+    # Tests named v_ use instructions newer than the 386: they run on the i686.
+    case "$name" in v_*) cpu="--cpu i686" ;; *) cpu="" ;; esac
     exp="tests/expected/$name.trace.gz"
     if [ -n "${ORACLE:-}" ]; then
         "$ORACLE" "$bin" 2>/dev/null | gzip -9n > "$exp"
     fi
-    build/g86m-debug --trace --max 2000000 "$bin" > "build/$name.trace" 2> "build/$name.err"
+    build/g86m-debug $cpu --trace --max 2000000 "$bin" > "build/$name.trace" 2> "build/$name.err"
     gunzip -c "$exp" > "build/$name.expected"
     # The release build must produce the same trace: optimization must not change behaviour.
-    if ! build/g86m --trace --max 2000000 "$bin" 2>/dev/null | cmp -s - "build/$name.expected"; then
+    if ! build/g86m $cpu --trace --max 2000000 "$bin" 2>/dev/null | cmp -s - "build/$name.expected"; then
         fail=1
         echo "FAIL  $name: release build differs from the expected trace"
     fi
@@ -53,8 +55,9 @@ done
 # Self-checking tests, for what the oracle cannot judge. A test passes when the console says OK and nothing else.
 for bin in build/s_*.bin; do
     name=$(basename "$bin" .bin)
+    case "$name" in s_686) cpu="--cpu i686" ;; *) cpu="" ;; esac
     for exe in build/g86m-debug build/g86m; do
-        out=$("$exe" --max 2000000 "$bin" 2>/dev/null)
+        out=$("$exe" $cpu --max 2000000 "$bin" 2>/dev/null)
         if [ "$out" = "OK" ]; then
             echo "ok    $name ($(basename "$exe"))"
         else
@@ -136,6 +139,20 @@ if [ -f images/test386.bin ] && [ -f images/test386-EE-reference.txt ]; then
     done
 else
     echo "skip  test386 (images/test386.bin and its reference are not there)"
+fi
+
+# Linux: the kernel is loaded directly and must get as far as printing its banner on the serial
+# console. Release build only: this is half a billion instructions.
+if [ -f images/vmlinuz-lts ] && [ -f images/initramfs-mini ]; then
+    out=$(build/g86m --headless --max 1200000000 --initrd images/initramfs-mini images/vmlinuz-lts 2>/dev/null)
+    if echo "$out" | grep -q "Linux version 6\."; then
+        echo "ok    linux banner (g86m): $(echo "$out" | grep -c '') lines of kernel log"
+    else
+        fail=1
+        echo "FAIL  linux banner (g86m): the kernel printed no version line"
+    fi
+else
+    echo "skip  linux banner (images/vmlinuz-lts and images/initramfs-mini are not there)"
 fi
 
 # The interactive console, driven through a pseudo-terminal. It takes the images that are there.
