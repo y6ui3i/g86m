@@ -1561,3 +1561,76 @@ What this says about the two languages, and what it does not: on this fragment t
 between Rust and Goose is what the compilers make of a `match` over integers, and a programmer
 who knows that can close most of it. It is one program of 250 lines. It says nothing about
 programs that use what Rust has and Goose lacks, or the reverse.
+
+## E020: The decompression phase, and repeated string instructions in bulk (2026-11-14)
+
+- **Hypothesis**: The kernel image decompresses itself before it starts, and that phase is a
+  large, simple part of the boot. Measured first: it is 393,896,527 guest instructions (24% of
+  the boot) and 3.7 s (18%), 63 billion host instructions, 160 per guest instruction; 94% of its
+  instructions already go through a short executor. So the phase is not slow per instruction;
+  it is long. What can still be removed without changing what the guest does is the per-element
+  cost of REP MOVS and REP STOS: each element goes through the general segment check, the
+  translation and the access, about 150 host instructions, and a whole boot runs 78 million of
+  them (E016). Copying a page-sized run at a time, with one translation per page, should take
+  about 10 billion host instructions off the boot's 313 billion.
+- **What changed since last time**: E016 counted the string iterations and set them aside as 3%.
+  Under the rule adopted since (keep what measurably helps), 3% is worth having. Nothing about
+  the guest changes: a repeated string instruction was already executed whole within one step.
+- **Next move for each result**:
+  - The boot's host instruction count falls → keep, with a test that copies overlapping regions
+    in both directions of overlap and across page ends
+  - It does not fall → the iterations are not where E016's estimate put them; count them per
+    phase before doing anything else
+  - The guest instruction count changes, or a test fails → the bulk copy differs from one
+    element at a time somewhere (overlap, a page end, a fault part-way); find the case, do not
+    widen the conditions
+- **Cut-off**: The same day. `tools/difftest.sh` at 48 of 48, test386 byte for byte, the boot at
+  1,651,240,001 instructions.
+
+### Result
+
+2026-11-14. **Half the hypothesis held. The boot's host instruction count falls, by 5.5 billion
+where 10 were predicted; the decompression phase itself hardly moves.**
+
+| | Before | After |
+|---|---:|---:|
+| Linux boot to the shell prompt | 312.6 billion host instructions, 20.0 s | 307.0 billion, 19.3 s |
+| The decompression phase alone (to the instruction that turns paging on) | 63.0 billion, 3.75 s | 62.4 billion, 3.68 s |
+| test386 | 1194 ms | 1162 ms |
+| bench.bin | 4658 ms | 4486 ms |
+
+The boot still takes 1,651,240,001 guest instructions; `tools/difftest.sh` is at 51 of 51 (three
+more); test386 is byte for byte the reference.
+
+- **The decompression phase is not where the string instructions are.** It gained 0.6 billion
+  of the 5.5. Inflating is byte-at-a-time work in ordinary instructions; the bulk copies of a
+  boot are later, in the kernel (clearing pages, unpacking the initramfs)
+- **What the phase is**: 394 million guest instructions at 160 host instructions each, 94% of
+  them already through a short executor. Of the 5.7% that are not, the largest are an
+  operand-size-prefixed `8B` (1.7% of the phase), REP MOVS (1.4%), `F7` (1.3%) and `D1` (0.6%).
+  There is no single thing left in it to remove; making it faster means making the short path
+  faster, which helps the rest of the boot equally
+- **The other way to shorten it is not to run it**: the payload is gzip (8.6 MB, to about
+  20 MB). Inflating it on the host and entering the kernel where the decompressor would have
+  jumped would take the phase's 3.7 s off a 19 s boot. That changes what is emulated (the
+  guest's own decompressor never runs), so it is a decision and not an optimisation; not done
+
+**The tests found two things, neither of them what they were written for.**
+
+- **The first versions of both new tests did not test the bulk copy at all.** A self-check for
+  overlapping copies passed; it also passed against a build in which the copy had been made
+  deliberately wrong. The bulk path had a condition (no wrap of physical addresses) that is
+  false on the machine the tests run on, so the ordinary path ran every time. The condition was
+  wider than it needed to be: it now asks only that the page itself lies below the wrap point.
+  After that the deliberately wrong build prints `N`
+- **rustx86 copies overlapping dwords wrongly.** `REP MOVSD` with the destination one byte above
+  the source: each dword is read whole and then written, so the next read sees three bytes of
+  what was just stored. Worked by hand for `11 22 33 44 55 66 77 88 99` and two dwords: `11 11
+  22 33 44 44 66 77 88`. g86m gives that, with and without the bulk path. rustx86 gives what a
+  byte-by-byte copy gives. The trace test (`u_strbulk`) therefore keeps to overlaps of a whole
+  element or more, and the closer ones are in a self-check with the hand-worked values
+  (`s_strovl`)
+
+The estimate of 10 billion was 78 million elements at about 130 host instructions saved each.
+Either fewer of them qualify (the bulk path wants an upward copy with 32-bit addressing through
+flat segments) or an element was costing less than 150; which was not measured.
