@@ -1,6 +1,6 @@
 // Instruction execution: a 386, in real mode, protected mode and virtual-8086 mode. The default
 // operand and address size come from the code segment (16 bits in real mode); the 66h and 67h
-// prefixes switch to the other. To software that asks, the machine is a 386 with no FPU and no
+// prefixes switch to the other. To software that asks, the 16-bit machine is a 386 with no FPU and no
 // CPUID: FLAGS bits 12-14 can be written and PUSH SP pushes the value from before the decrement.
 //
 // exec_one runs one instruction and returns false when a fault cut it short (see raise in
@@ -14,6 +14,7 @@ import alu;
 import prot;
 import bios;
 import dev;
+import fpu;
 
 // ---- Decode state that lives for one instruction ----
 
@@ -570,6 +571,7 @@ fn two_byte() {
                     decode_modrm();
                     need_ring0();
                     cr[m_reg] = r32(m_rm);
+                    if i686 && m_reg == 0 { cr[0] |= 0x10; }          // ET: the FPU is a 387 or later, always
                     flush_tlb();
                     if !protected() { set_cpl(0); }
                 },
@@ -649,10 +651,10 @@ fn two_byte() {
                         set_r32(DX, 0x49656E69);
                         set_r32(CX, 0x6C65746E);
                     } else if leaf == 1 {
-                        // Family 6, the P6. Only what is implemented is claimed: the timestamp
-                        // counter, CMPXCHG8B and CMOV. No FPU yet.
+                        // Family 6, the P6. Only what is implemented is claimed: the FPU, the
+                        // timestamp counter, CMPXCHG8B and CMOV.
                         set_r32(AX, 0x0633);
-                        set_r32(DX, 1 << 4 | 1 << 8 | 1 << 15);
+                        set_r32(DX, 1 | 1 << 4 | 1 << 8 | 1 << 15);
                     }
                 },
                 _ => { cpu.ip = saved.ip; stop("unimplemented opcode 0F", op); },
@@ -1011,7 +1013,7 @@ fn exec_one() -> bool {
                     else { set_r32(DX, if r32(AX) & 0x80000000 != 0 { 0xFFFFFFFF } else { 0 }); }
                 },
                 0x9A => { let off = fetchv(); let seg = fetch16() as! u16; far_call(seg, off, osz); },
-                0x9B => {},
+                0x9B => { if i686 && cr[0] & 0x0A == 0x0A { fault(7); } },      // FWAIT: traps when MP and TS are set
                 0x9C => { if v86() { io_sensitive(); } pushv(cpu.flags & 0x00FCFFFF); },
                 0x9D => {
                     if v86() { io_sensitive(); }
@@ -1119,7 +1121,8 @@ fn exec_one() -> bool {
                 },
                 0xD6 => { set_r8(0, if flag(CF) { 0xFF } else { 0 }); },
                 0xD7 => { let index: u32 = r8(0); set_r8(0, seg_read(seg_of(DS), (addr_reg(BX) + index) & (if asz32 { 0xFFFFFFFF } else { 0xFFFF }), 8) as! u8); },
-                0xD8..0xE0 => { decode_modrm(); },      // no FPU: skip the operand
+                // The i686 has an FPU. The 386 has none and lets the escape opcodes pass.
+                0xD8..0xE0 => { decode_modrm(); if i686 { fpu_escape(op); } },
                 _ => { cpu.ip = saved.ip; stop("unimplemented opcode", op); },
             }
         },

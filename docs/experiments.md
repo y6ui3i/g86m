@@ -875,3 +875,95 @@ What the log shows that is not right yet, none of it stopping the boot:
 
 Not done: nothing here measures whether the instructions run correctly inside the kernel beyond
 the kernel's own behaviour. `v_686` covers them in real mode only.
+
+## E013: An x87 FPU backed by f64, and boot Linux to a shell (M5c, 2026-11-14)
+
+- **Hypothesis**: The FPU is the last thing between the kernel and user space. With an x87
+  whose registers are `f64` (what rustx86 did), the FPU bit claimed in CPUID and the ET bit set
+  in CR0, the 6.18 kernel gets through its FPU set-up, unpacks the initramfs, and busybox gives
+  a shell prompt on the serial console.
+- **What changed since last time**: E012's machine skipped the operand of every escape opcode
+  (D8 to DF) and said it had no FPU. Now the i686 executes them: the register stack, the control,
+  status and tag words, loads and stores in the three real and three integer formats, arithmetic
+  and comparison, the transcendental instructions through libm, and FNSAVE/FRSTOR. Device-not-
+  available (vector 7) is raised when CR0 has EM or TS set. The 386 machine is left as it was.
+  Rounding control is honoured: directed rounding is made from the sign of the exact residual, as
+  rustx86 does. Extended precision is not: a register holds 53 bits of mantissa, not 64, except
+  that an 80-bit value loaded and stored again untouched keeps all its bits.
+- **Next move for each result**:
+  - A shell prompt → run `echo`, `ls`, `uname -a`, and the two commands rustx86's history says an
+    absent FPU breaks (`sleep 3` taking three seconds of guest time, `printf '%f' 3`); add a
+    scripted session to `tools/difftest.sh`; open a PR
+  - The kernel stops on an instruction g86m does not have (FXSAVE, an SSE one, a missing x87
+    one) → add it if a P6 without SSE would have it; if the kernel wants FXSR, read why it thinks
+    the CPU has it before adding anything
+  - The kernel panics or hangs before user space → read the message; the candidates in order are
+    the FPU self-test (`fpu__init_check_bugs`, the FDIV check), the missing CMOS clock, and the
+    interrupt controller
+  - User space starts but a program misbehaves → trace the escape opcodes it runs, compare the
+    same sequence against rustx86 with a trace test
+- **Cut-off**: The same day. Whatever the kernel does, the FPU gets trace tests against rustx86
+  (results stored to memory and loaded into integer registers, since the trace has no FPU
+  state) and a self-check before the PR.
+
+### Result
+
+2026-11-14. **The hypothesis held on the first boot. The kernel finishes, unpacks the initramfs,
+and busybox gives a shell on the serial console.** About 1.9 billion instructions and 41 seconds
+of host time from the kernel's first instruction to the prompt.
+
+```
+[    2.760645] x86/fpu: x87 FPU will use FSAVE
+[   11.082721] Run /init as init process
+~ # uname -a
+Linux (none) 6.18.35-0-lts #1-Alpine SMP PREEMPT_DYNAMIC 2026-06-09 12:34:47 i686 Linux
+~ # cat /proc/uptime; sleep 3; cat /proc/uptime
+13.69 0.07
+16.72 3.06
+~ # grep flags /proc/cpuinfo
+flags		: fpu tsc cx8 cmov cpuid
+```
+
+No instruction was missing: the kernel is content with FSAVE and never asked for FXSAVE or SSE.
+
+What was added besides the FPU, because a shell that cannot be typed at proves little:
+
+- A serial console. Started from a terminal with a kernel image, g86m puts the terminal in raw
+  mode and connects it to the guest's serial port, paced against real time; Ctrl-] leaves
+- `--wait` and `--type` act on the serial port when the guest's console is one. A wait looks only
+  at output that came after the previous wait matched
+
+`tools/difftest.sh` now has 43 checks, all passing. New: three trace tests of the FPU against
+rustx86 (`v_fpu1` to `v_fpu3`, 363 lines; the first two matched on their first run), a self-check
+for what rustx86 cannot judge (`s_fpu`), a scripted Linux session (uname, `printf '%f' 3`, awk's
+square root and arctangent, `sleep 3` taking three seconds of guest time), and the serial console
+driven through a pseudo-terminal (`sleep 3` took 3.06 s of real time).
+
+Two things were wrong on the way:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| awk printed `atan2(1,1)*4` as 0 | For the D9 F0 to FF instructions the r/m field is part of the opcode; the code took it as a register number and used ST(3) where FPATAN means ST(1). The same slip was in FYL2X, FYL2XP1, FPREM, FPREM1 and FSCALE | They read ST(1) |
+| `v_fpu3` differed from rustx86 at one line | `FLD ST(0)` of an 80-bit value: g86m copies all 64 mantissa bits, rustx86 keeps 53. g86m is the one that matches real hardware | The test stores the value without copying it; the copy is checked in `s_fpu` |
+
+**What is wrong, and known: floats are printed truncated, not rounded.**
+
+```
+~ # printf '%f %g %e\n' 3 0.1 12345.678
+3.000000 0.0999999 1.234567e+04
+```
+
+The right answers are `0.1` and `1.234568e+04`. musl's printf decides whether to round the last
+digit up by adding a small number to 2^64 and seeing whether the sum changed. With the 64-bit
+mantissa of a real x87 it changes; with the 53 bits of an f64 it never does, so nothing is ever
+rounded up. This is the cost of the f64 registers that the card accepted, and it is larger than
+the card thought: not "the last bits of a long double" but the last digit of every printed float.
+rustx86 has the same registers and by the same reasoning the same answer; that was not run.
+The fix is arithmetic on the 80-bit format itself (add, subtract, multiply, divide, square root
+in integers, 64 bits of mantissa), with f64 kept only for the functions that go through libm.
+
+Not done, and not needed to get here: FBLD and FBSTP (the machine stops and says so if one is
+met), floating-point exceptions (none is ever raised), the instruction and operand pointers in
+the saved environment (written as zero), FXSAVE and SSE, a disk, a network card, a clock chip.
+Whether FCOMI on real hardware clears OF, SF and AF was not checked; g86m leaves them, as
+rustx86 does.

@@ -3,8 +3,9 @@
 //   g86m [options] image
 //
 // A Linux kernel image (a bzImage) is loaded and entered directly, with --initrd and --append
-// giving its initramfs and command line; its console is the serial port, and what it prints there
-// goes to standard output. A 512-byte image is a boot sector. A 64 KB or 128 KB image is a ROM that replaces the BIOS: it
+// giving its initramfs and command line; its console is the serial port. Started from a terminal,
+// the terminal is that serial port (Ctrl-] leaves); otherwise what the kernel prints goes to
+// standard output. A 512-byte image is a boot sector. A 64 KB or 128 KB image is a ROM that replaces the BIOS: it
 // is placed at the top of the first megabyte and started at the reset vector, F000:FFF0. Anything
 // else is a floppy image booted as drive A.
 // A floppy image started from a terminal, with no script and no trace, opens the interactive
@@ -110,13 +111,36 @@ var step_arg: i64[>..];          // index of the step's text in args()
 var step_pos = 0;
 var step_started = false;        // the current type step has queued its keys
 var type_index = 0;              // next character of the current type step
+var serial = false;              // the guest's console is its serial port: the script waits on and types to that
+var serial_seen = 0;             // how much of the serial output earlier wait steps have consumed
 
 // Advances the script as far as it can go right now. True once every step is done.
 fn script_poll() -> bool {
     let a = args();
     while step_pos < step_kind.len {
         let text = a[step_arg[step_pos]];
-        if step_kind[step_pos] == STEP_WAIT {
+        if serial {
+            if step_kind[step_pos] == STEP_WAIT {
+                // Each wait looks only at what came after the last one matched, so that waiting
+                // for the prompt a second time waits for a second prompt.
+                let at = find(com_out[serial_seen..], text);
+                if at < 0 { return false; }
+                serial_seen += at + text.len;
+            } else {
+                // One byte per poll, once the guest has read the last one.
+                if type_index < text.len && !com_has_input() {
+                    var c = text[type_index];
+                    if c == '\\' && type_index + 1 < text.len && text[type_index + 1] == 'n' {
+                        c = '\r';               // Enter, as a terminal sends it
+                        type_index++;
+                    }
+                    com_receive(c);
+                    type_index++;
+                }
+                if type_index < text.len || com_has_input() { return false; }
+                type_index = 0;
+            }
+        } else if step_kind[step_pos] == STEP_WAIT {
             var scr: u8[>..] = [];
             screen_text(scr, false);
             if find(scr, text) < 0 { return false; }
@@ -222,6 +246,38 @@ fn run_console(max: i64) -> i64 {
     return result;
 }
 
+// The serial console: the guest's serial port is the terminal. As run_console, but there is no
+// screen to draw: what the guest sends is written as it comes, and what is typed goes to the
+// port. Ctrl-] leaves.
+fn run_serial(max: i64) -> i64 {
+    let slice = insns_per_second() / 100;
+    var t0 = clock_ns();
+    var v0 = vtime;
+    var result = RUN_BUDGET;
+    while vtime < max {
+        result = run_until(vtime + slice);
+        var quit = false;
+        loop {
+            let b = con_read();
+            if b < 0 { break; }
+            if b == 0x1D { quit = true; break; }
+            com_receive(b as! u8);
+        }
+        com_flush();
+        guard !quit && result == RUN_BUDGET else { break; }
+        let guest_ns = (vtime - v0) * 1000000000 / insns_per_second();
+        let ahead = guest_ns - (clock_ns() - t0);
+        if ahead > 0 {
+            let nap = if ahead > 50000000 { 50000000 } else { ahead };
+            con_sleep_us((nap / 1000) as! i32);
+        } else if ahead < -200000000 {
+            t0 = clock_ns();
+            v0 = vtime;
+        }
+    }
+    return result;
+}
+
 fn main() {
     let a = args();
     var show_screen = false;
@@ -287,6 +343,7 @@ fn main() {
         com_live = true;
         i686 = true;
         tick_insns = 64;
+        serial = true;
     } else if rom {
         // The ROM ends at the top of the first megabyte. A CPU starts at the reset vector.
         for b, k in img { ram[0x100000 - img.len + k] = b; }
@@ -317,6 +374,7 @@ fn main() {
         guard a[cpu_arg] == "386" || a[cpu_arg] == "i686" else { write_stderr("g86m: --cpu takes 386 or i686\n"); exit(2); }
         i686 = a[cpu_arg] == "i686";
     }
+    if i686 { cr[0] |= 0x10; }               // ET: the i686 has an FPU
 
     scripted = step_kind.len > 0;
     var interactive = !trace && !scripted && !headless && img.len != 512 && !rom && !kernel && con_is_tty() != 0;
@@ -327,11 +385,19 @@ fn main() {
         if con_rows() <= 25 { con_sleep_us(1200000); }     // no room for the hint line: let it be read
         interactive = con_open() != 0;
     }
+    // A kernel started from a terminal gets that terminal as its serial console.
+    var serial_console = kernel && !trace && !scripted && !headless && con_is_tty() != 0;
+    if serial_console {
+        write_stdout("g86m: Ctrl-] to quit\r\n");
+        flush_stdout();
+        serial_console = con_raw() != 0;
+    }
     let t0 = clock_ns();
     if trace { trace_line(); }
-    let result = if interactive { run_console(max) } else { run_until(max) };
+    let result = if interactive { run_console(max) } else if serial_console { run_serial(max) } else { run_until(max) };
     com_flush();
     let ms = (clock_ns() - t0) / 1000000;
+    if serial_console { con_close(); write_stdout("\n"); }
     if interactive {
         con_close();
         // The reason was written while the console's screen was up, where it cannot be seen.
@@ -339,7 +405,7 @@ fn main() {
     }
     if trace { write_stdout(trace_buf); }
 
-    if show_screen || scripted || interactive {
+    if show_screen || (scripted && !serial) || interactive {
         var scr: u8[>..] = [];
         screen_text(scr, true);
         write_stdout(scr);

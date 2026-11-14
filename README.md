@@ -9,12 +9,17 @@ its per-instruction trace is compared with g86m's.
 
 ## Status
 
-M4 is done: g86m is a 386 with protected mode, paging and virtual-8086 mode, and it passes
+M5 is done: g86m boots a 32-bit Linux kernel (6.18) to a busybox shell on its serial console. For
+that the machine is an i686 with an x87 FPU; the FPU's registers hold 64-bit floats, not the 80
+bits of the real one, which is enough to boot and wrong in the last digit of `printf '%g' 0.1`
+(see E013 in the ledger).
+
+M4: g86m is a 386 with protected mode, paging and virtual-8086 mode, and it passes
 [test386](https://github.com/barotto/test386.asm): the ROM reaches its final diagnostic code and
 its 44,926 lines of output match the reference taken from real hardware byte for byte. Task
 switching is not implemented. FreeDOS 1.4 (M3) and ELKS 0.9.1 (M2) boot and can be used by hand in
 the terminal console, or driven by a script.
-Seventeen instruction tests match rustx86 line for line on the full 32-bit state at every
+Twenty-one test traces match rustx86 line for line on the full 32-bit state at every
 instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
 [docs/goose-notes.md](docs/goose-notes.md).
@@ -29,7 +34,7 @@ How the first day went is written up in a blog post (in Japanese):
 | M2 | The ELKS shell | done |
 | M3 | FreeDOS to the `A:\>` prompt | done (the installer was declined, not run) |
 | M4 | 386 protected mode and paging; pass test386 | done (no task switching) |
-| M5 | 32-bit Linux and busybox | in progress: the kernel prints its boot log and stops for want of an FPU |
+| M5 | 32-bit Linux and busybox | done (an FPU of 64-bit floats; no disk, no network, no clock chip) |
 
 ## Technology choices
 
@@ -85,12 +90,18 @@ each `--type` types at the keyboard. A scripted run is not paced and skips idle 
 ./build/g86m --wait "login:" --type "root\n" --wait "# " --type "uname -a\n" --wait "i8086" images/fd2880.img
 ```
 
-A Linux kernel image is loaded and entered directly; its serial console goes to standard output.
-It does not boot yet: the kernel prints about a hundred lines of its log and then gives up
-because there is no FPU.
+A Linux kernel image is loaded and entered directly, and the terminal becomes its serial console:
+the boot log scrolls by, and after about 40 seconds there is a shell. **Ctrl-]** leaves.
 
 ```bash
-./build/g86m --max 1500000000 --initrd images/initramfs-mini images/vmlinuz-lts
+./build/g86m --initrd images/initramfs-mini images/vmlinuz-lts
+```
+
+`--wait` and `--type` work here too, on the serial port instead of the screen. Each `--wait` looks
+only at what was printed after the previous one matched.
+
+```bash
+./build/g86m --initrd images/initramfs-mini --wait "~ # " --type "uname -a\n" --wait "~ # " images/vmlinuz-lts
 ```
 
 To run test386, build its ROM with `COM_PORT equ 1` in `src/configuration.asm` and put `test386.bin`
@@ -110,8 +121,8 @@ and `images/fd14boot.img` is the FreeDOS 1.4 boot floppy from [freedos.org](http
 tools/difftest.sh
 ```
 
-With the images in `images/`, it also runs test386, scripted ELKS and FreeDOS sessions, and drives
-the console through a pseudo-terminal ([tools/console_test.py](tools/console_test.py)). A session whose
+With the images in `images/`, it also runs test386, scripted ELKS, FreeDOS and Linux sessions, and
+drives the console through a pseudo-terminal ([tools/console_test.py](tools/console_test.py)). A session whose
 image is missing is reported as skipped.
 
 It assembles one boot sector per instruction group (`tests/asm/`) with NASM, runs each, and compares
@@ -127,11 +138,12 @@ To regenerate them, run `ORACLE=/path/to/trace32 tools/difftest.sh`.
 | [src/alu.goose](src/alu.goose) | Arithmetic and flags, shifts and rotates |
 | [src/prot.goose](src/prot.goose) | Descriptors, segment loading, far transfers, interrupt and fault delivery, virtual-8086 mode |
 | [src/exec.goose](src/exec.goose) | Instruction decode and execution |
+| [src/fpu.goose](src/fpu.goose) | The x87 FPU of the i686 machine |
 | [src/bios.goose](src/bios.goose) | Power-on setup and the BIOS services the emulator performs: screen, disk, keyboard, time |
 | [src/dev.goose](src/dev.goose) | Interrupt controllers, timer, keyboard controller, I/O port dispatch |
 | [src/linux.goose](src/linux.goose) | Loading a Linux kernel and entering it directly (zero page, memory map, initramfs) |
 | [src/console.goose](src/console.goose), [src/console.c](src/console.c) | The terminal console: drawing the screen, translating keys; raw terminal mode in C |
-| [src/g86m.goose](src/g86m.goose) | The run loop, interrupt delivery, pacing, the session script, the command line |
+| [src/g86m.goose](src/g86m.goose) | The run loop, interrupt delivery, pacing, the serial console, the session script, the command line |
 | [src/big.goose](src/big.goose) | The large arrays (RAM and three others), in a file of their own so they come last in memory |
 
 The boot sectors in `testdata/` are copied from rustx86's `asm/` as they are, including the Japanese

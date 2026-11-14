@@ -55,7 +55,7 @@ done
 # Self-checking tests, for what the oracle cannot judge. A test passes when the console says OK and nothing else.
 for bin in build/s_*.bin; do
     name=$(basename "$bin" .bin)
-    case "$name" in s_686) cpu="--cpu i686" ;; *) cpu="" ;; esac
+    case "$name" in s_686|s_fpu) cpu="--cpu i686" ;; *) cpu="" ;; esac
     for exe in build/g86m-debug build/g86m; do
         out=$("$exe" $cpu --max 2000000 "$bin" 2>/dev/null)
         if [ "$out" = "OK" ]; then
@@ -144,15 +144,24 @@ fi
 # Linux: the kernel is loaded directly and must get as far as printing its banner on the serial
 # console. Release build only: this is half a billion instructions.
 if [ -f images/vmlinuz-lts ] && [ -f images/initramfs-mini ]; then
-    out=$(build/g86m --headless --max 1200000000 --initrd images/initramfs-mini images/vmlinuz-lts 2>/dev/null)
-    if echo "$out" | grep -q "Linux version 6\."; then
-        echo "ok    linux banner (g86m): $(echo "$out" | grep -c '') lines of kernel log"
+    out=$(build/g86m --max 8000000000 --initrd images/initramfs-mini \
+        --wait "~ # " --type "uname -m\n" --wait "~ # " \
+        --type "printf '%f' 3; echo\n" --wait "~ # " \
+        --type "awk 'BEGIN{print sqrt(2), atan2(1,1)*4, int(-3.7)}'\n" --wait "~ # " \
+        --type "a=\$(cut -d. -f1 /proc/uptime); sleep 3; b=\$(cut -d. -f1 /proc/uptime); echo slept-\$((b-a))\n" --wait "~ # " \
+        images/vmlinuz-lts 2>"build/linux.err" | tr -d '\r')
+    status=$?
+    if echo "$out" | grep -q "^i686$" && echo "$out" | grep -q "^3\.000000$" \
+        && echo "$out" | grep -q "^1\.41421 3\.14159 -3$" && echo "$out" | grep -Eq "^slept-[34]$"; then
+        echo "ok    linux shell (g86m): $(echo "$out" | grep -c '') lines; uname, printf %f, awk, sleep 3"
     else
         fail=1
-        echo "FAIL  linux banner (g86m): the kernel printed no version line"
+        echo "FAIL  linux shell (g86m): the session did not give the expected answers"
+        echo "$out" | tail -12 | sed 's/^/    |/'
+        tail -1 "build/linux.err" | sed 's/^/  stderr:   /'
     fi
 else
-    echo "skip  linux banner (images/vmlinuz-lts and images/initramfs-mini are not there)"
+    echo "skip  linux shell (images/vmlinuz-lts and images/initramfs-mini are not there)"
 fi
 
 # The interactive console, driven through a pseudo-terminal. It takes the images that are there.
