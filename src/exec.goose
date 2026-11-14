@@ -1007,11 +1007,53 @@ let K_TEST8_I = 28;      // F6 /0 and /1
 let K_TEST_I = 29;       // F7 /0 and /1
 let K_IMUL = 30;         // 0F AF
 let K_SETCC = 31;        // 0F 90 to 0F 9F; the condition is in imm
+// An executor that knows which operation it is does not have to find out each time it runs.
+let K_JCC_MASK = 32;     // Jcc on O, B, Z, BE, S or P and their opposites: taken when (flags & mask) != 0, or not
+let K_JCC_L = 33;        // Jcc on L or GE: SF and OF differ, or not
+let K_JCC_LE = 34;       // Jcc on LE or G
+let K_SHL_I = 35;        // C1 /4 and /6 with a count from 1 to 31
+let K_SHR_I = 36;        // C1 /5
+let K_SAR_I = 37;        // C1 /7
+let K_ALU_RM_R_OP = 40;  // 40 to 47: K_ALU_RM_R for one operation (ADC and SBB stay general)
+let K_ALU_R_RM_OP = 48;  // 48 to 55
+let K_ALU_RM_I_OP = 56;  // 56 to 63
 
 // Byte k of the instruction, from its first eight.
 inline fn raw8(raw: u64, k: u32) -> u32 { return (raw >> (k * 8) & 0xFF) as! u32; }
 inline fn raw32(raw: u64, k: u32) -> u32 { return (raw >> (k * 8) & 0xFFFFFFFF) as! u32; }
 inline fn sext8(v: u32) -> u32 { return ((v as! u8) as! i8) as! u32; }
+
+// ADC and SBB read the carry: they keep the general arithmetic executor.
+inline fn carries(aop: u8) -> bool { return aop == 2 || aop == 3; }
+
+// The kind for 83 and 81, whose operation is the reg field of the operand.
+fn imm_kind(mm: u32) -> u8 {
+    let aop = (mm >> 4 & 7) as! u8;
+    if carries(aop) { return K_ALU_RM_I; }
+    return K_ALU_RM_I_OP + aop;
+}
+
+// A condition code as a kind, and as what that kind keeps in disp: for the mask kind, the flags
+// to test, with bit 31 set when the jump is taken on none of them being set; for the other two,
+// 1 when the sense is the opposite one.
+fn jcc_kind(cc: u8) -> u8 {
+    if cc >> 1 <= 5 { return K_JCC_MASK; }
+    if cc >> 1 == 6 { return K_JCC_L; }
+    return K_JCC_LE;
+}
+
+fn jcc_data(cc: u8) -> u32 {
+    let neg: u32 = cc & 1;
+    match cc >> 1 {
+        0 => { return OF | neg << 31; },
+        1 => { return CF | neg << 31; },
+        2 => { return ZF | neg << 31; },
+        3 => { return CF | ZF | neg << 31; },
+        4 => { return SF | neg << 31; },
+        5 => { return PF | neg << 31; },
+        _ => { return neg; },
+    }
+}
 
 // Decides whether the instruction in this entry has a short executor. Called the second time
 // the instruction is met: by then the first, general, execution has recorded its operand.
@@ -1029,13 +1071,23 @@ fn classify(slot: i64, raw: u64) {
             len = after_m;
             if op == 0x8B { kind = K_MOV_R_RM; }
             else if op == 0x89 { kind = K_MOV_RM_R; }
-            else if op < 0x40 && op & 7 == 1 { kind = K_ALU_RM_R; }
-            else if op < 0x40 && op & 7 == 3 { kind = K_ALU_R_RM; }
-            else if op == 0x83 { kind = K_ALU_RM_I; imm = sext8(raw8(raw, after_m)); len = after_m + 1; }
-            else if op == 0x81 && after_m <= 4 { kind = K_ALU_RM_I; imm = raw32(raw, after_m); len = after_m + 4; }
+            else if op < 0x40 && op & 7 == 1 { kind = if carries(op >> 3) { K_ALU_RM_R } else { K_ALU_RM_R_OP + (op >> 3) }; }
+            else if op < 0x40 && op & 7 == 3 { kind = if carries(op >> 3) { K_ALU_R_RM } else { K_ALU_R_RM_OP + (op >> 3) }; }
+            else if op == 0x83 { kind = imm_kind(mm); imm = sext8(raw8(raw, after_m)); len = after_m + 1; }
+            else if op == 0x81 && after_m <= 4 { kind = imm_kind(mm); imm = raw32(raw, after_m); len = after_m + 4; }
             else if op == 0x8D && mm & 0x0C != 0x0C { kind = K_LEA; }
             else if op == 0x85 { kind = K_TEST; }
-            else if op == 0xC1 { kind = K_SHIFT_I; imm = raw8(raw, after_m); len = after_m + 1; }
+            else if op == 0xC1 {
+                kind = K_SHIFT_I;
+                imm = raw8(raw, after_m);
+                len = after_m + 1;
+                let which = mm >> 4 & 7;
+                if which >= 4 && imm & 0x1F != 0 {
+                    // A shift by a count that does something: its own executor, with the count.
+                    imm = imm & 0x1F;
+                    kind = if which == 5 { K_SHR_I } else if which == 7 { K_SAR_I } else { K_SHL_I };
+                }
+            }
             else if op == 0xD3 { kind = K_SHIFT_CL; }
             else if op == 0x8A { kind = K_MOV8_R_RM; }
             else if op == 0x88 { kind = K_MOV8_RM_R; }
@@ -1055,7 +1107,7 @@ fn classify(slot: i64, raw: u64) {
                 else if op2 >= 0x90 && op2 <= 0x9F { kind = K_SETCC; imm = op2 & 15; }
             }
         } else if mm == 0 {
-            if op >= 0x70 && op <= 0x7F { kind = K_JCC; cc = op & 15; imm = sext8(raw8(raw, 1)); len = 2; }
+            if op >= 0x70 && op <= 0x7F { kind = jcc_kind(op & 15); cc = jcc_data(op & 15); imm = sext8(raw8(raw, 1)); len = 2; }
             else if op == 0xEB { kind = K_JMP; imm = sext8(raw8(raw, 1)); len = 2; }
             else if op == 0xE9 { kind = K_JMP; imm = raw32(raw, 1); len = 5; }
             else if op == 0xE8 { kind = K_CALL; imm = raw32(raw, 1); len = 5; }
@@ -1068,13 +1120,13 @@ fn classify(slot: i64, raw: u64) {
             else if op >= 0xB8 && op <= 0xBF { kind = K_MOV_R_I; imm = raw32(raw, 1); len = 5; }
             else if op == 0x0F {
                 let op2 = raw8(raw, 1);
-                if op2 >= 0x80 && op2 <= 0x8F { kind = K_JCC; cc = op2 & 15; imm = raw32(raw, 2); len = 6; }
+                if op2 >= 0x80 && op2 <= 0x8F { kind = jcc_kind((op2 & 15) as! u8); cc = jcc_data((op2 & 15) as! u8); imm = raw32(raw, 2); len = 6; }
             }
         }
     }
     if kind != K_NONE && len <= 8 {
         dc[slot].imm = imm;
-        if kind == K_JCC { dc[slot].disp = cc; }
+        if kind == K_JCC || (kind >= K_JCC_MASK && kind <= K_JCC_LE) { dc[slot].disp = cc; }
         dc[slot].m = mm | len << 26;
         dc[slot].mask = byte_mask(len);
         dc[slot].pre.kind = kind;
@@ -1187,7 +1239,32 @@ inline fn run_short(kind: u8, slot: i64) {
             let p = imul(cpu.regs[reg], short_read(mm), 32);
             cpu.regs[reg] = p as! u32;
         },
-        _ => { short_ea(mm, slot); short_write8(mm, if cond(imm as! u8) { 1 } else { 0 }); },
+        31 => { short_ea(mm, slot); short_write8(mm, if cond(imm as! u8) { 1 } else { 0 }); },
+        32 => { let d = dc[slot].disp; if (cpu.flags & d & 0xFFF != 0) != (d >> 31 != 0) { cpu.ip += imm; } },
+        33 => { let lt = (cpu.flags >> 7 ^ cpu.flags >> 11) & 1; if lt != dc[slot].disp { cpu.ip += imm; } },
+        34 => { let le = ((cpu.flags >> 7 ^ cpu.flags >> 11) | cpu.flags >> 6) & 1; if le != dc[slot].disp { cpu.ip += imm; } },
+        35 => { short_ea(mm, slot); short_write(mm, shl32(short_read(mm), imm)); },
+        36 => { short_ea(mm, slot); short_write(mm, shr32(short_read(mm), imm)); },
+        37 => { short_ea(mm, slot); short_write(mm, sar32(short_read(mm), imm)); },
+        40 => { short_ea(mm, slot); let r = alu(0, short_read(mm), cpu.regs[reg], 32); short_write(mm, r); },
+        41 => { short_ea(mm, slot); let r = alu(1, short_read(mm), cpu.regs[reg], 32); short_write(mm, r); },
+        44 => { short_ea(mm, slot); let r = alu(4, short_read(mm), cpu.regs[reg], 32); short_write(mm, r); },
+        45 => { short_ea(mm, slot); let r = alu(5, short_read(mm), cpu.regs[reg], 32); short_write(mm, r); },
+        46 => { short_ea(mm, slot); let r = alu(6, short_read(mm), cpu.regs[reg], 32); short_write(mm, r); },
+        47 => { short_ea(mm, slot); let r = alu(7, short_read(mm), cpu.regs[reg], 32); },
+        48 => { short_ea(mm, slot); let r = alu(0, cpu.regs[reg], short_read(mm), 32); cpu.regs[reg] = r; },
+        49 => { short_ea(mm, slot); let r = alu(1, cpu.regs[reg], short_read(mm), 32); cpu.regs[reg] = r; },
+        52 => { short_ea(mm, slot); let r = alu(4, cpu.regs[reg], short_read(mm), 32); cpu.regs[reg] = r; },
+        53 => { short_ea(mm, slot); let r = alu(5, cpu.regs[reg], short_read(mm), 32); cpu.regs[reg] = r; },
+        54 => { short_ea(mm, slot); let r = alu(6, cpu.regs[reg], short_read(mm), 32); cpu.regs[reg] = r; },
+        55 => { short_ea(mm, slot); let r = alu(7, cpu.regs[reg], short_read(mm), 32); },
+        56 => { short_ea(mm, slot); let r = alu(0, short_read(mm), imm, 32); short_write(mm, r); },
+        57 => { short_ea(mm, slot); let r = alu(1, short_read(mm), imm, 32); short_write(mm, r); },
+        60 => { short_ea(mm, slot); let r = alu(4, short_read(mm), imm, 32); short_write(mm, r); },
+        61 => { short_ea(mm, slot); let r = alu(5, short_read(mm), imm, 32); short_write(mm, r); },
+        62 => { short_ea(mm, slot); let r = alu(6, short_read(mm), imm, 32); short_write(mm, r); },
+        63 => { short_ea(mm, slot); let r = alu(7, short_read(mm), imm, 32); },
+        _ => {},
     }
 }
 

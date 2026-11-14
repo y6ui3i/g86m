@@ -23,12 +23,24 @@ inline fn parity8(v: u32) -> bool {
     return x & 1 == 0;
 }
 
+// The parity flag for each value of a result's low byte: PF where the byte has an even number of
+// one bits.
+let PARITY: u8[256] = [
+    4, 0, 0, 4, 0, 4, 4, 0, 0, 4, 4, 0, 4, 0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 4, 4, 0, 0, 4, 0, 4, 4, 0,
+    0, 4, 4, 0, 4, 0, 0, 4, 4, 0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 4, 0, 4, 4, 0, 0, 4, 4, 0, 4, 0, 0, 4,
+    0, 4, 4, 0, 4, 0, 0, 4, 4, 0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 4, 0, 4, 4, 0, 0, 4, 4, 0, 4, 0, 0, 4,
+    4, 0, 0, 4, 0, 4, 4, 0, 0, 4, 4, 0, 4, 0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 4, 4, 0, 0, 4, 0, 4, 4, 0,
+    0, 4, 4, 0, 4, 0, 0, 4, 4, 0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 4, 0, 4, 4, 0, 0, 4, 4, 0, 4, 0, 0, 4,
+    4, 0, 0, 4, 0, 4, 4, 0, 0, 4, 4, 0, 4, 0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 4, 4, 0, 0, 4, 0, 4, 4, 0,
+    4, 0, 0, 4, 0, 4, 4, 0, 0, 4, 4, 0, 4, 0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 4, 4, 0, 0, 4, 0, 4, 4, 0,
+    0, 4, 4, 0, 4, 0, 0, 4, 4, 0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 4, 0, 4, 4, 0, 0, 4, 4, 0, 4, 0, 0, 4,
+];
+
 // The zero, sign and parity bits for a result, as they sit in EFLAGS.
 inline fn szp(r: u32, w: u8) -> u32 {
-    var f: u32 = 0;
+    var f: u32 = PARITY[r & 0xFF];
     if r & mask(w) == 0 { f |= ZF; }
     if r & msb(w) != 0 { f |= SF; }
-    if parity8(r) { f |= PF; }
     return f;
 }
 
@@ -177,4 +189,35 @@ fn shift_double(left: bool, dst0: u32, src0: u32, count: u8, w: u8) -> u32 {
     set_flag(CF, cf);
     set_szp(dst, w);
     return dst;
+}
+
+// ---- 32-bit shifts by a known count from 1 to 31, for the short executors ----
+//
+// The same results and flags as shift() gives: the last bit shifted out in CF, the result's zero,
+// sign and parity, and OF only when the count is 1.
+
+inline fn shl32(v: u32, n: u32) -> u32 {
+    let r = v << n;
+    let cf = v >> (32 - n) & 1;
+    var f = cpu.flags & 0xFFFFFF3A | cf | szp(r, 32);
+    if n == 1 { f = f & 0xFFFFF7FF | (if r >> 31 != cf { OF } else { 0 }); }
+    cpu.flags = f;
+    return r;
+}
+
+inline fn shr32(v: u32, n: u32) -> u32 {
+    let r = v >> n;
+    var f = cpu.flags & 0xFFFFFF3A | (v >> (n - 1) & 1) | szp(r, 32);
+    if n == 1 { f = f & 0xFFFFF7FF | (v >> 20 & OF); }
+    cpu.flags = f;
+    return r;
+}
+
+inline fn sar32(v: u32, n: u32) -> u32 {
+    var r = v >> n;
+    if v >> 31 != 0 { r |= 0xFFFFFFFF << (32 - n); }
+    var f = cpu.flags & 0xFFFFFF3A | (v >> (n - 1) & 1) | szp(r, 32);
+    if n == 1 { f &= 0xFFFFF7FF; }
+    cpu.flags = f;
+    return r;
 }
