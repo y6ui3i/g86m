@@ -1367,3 +1367,110 @@ that buys.
 The guest instruction counts differ (rustx86 runs 256 instructions per timer tick, g86m 64) and
 rustx86's count is rounded up to its 10-million-instruction check, so the times are comparable
 and the per-instruction figures slightly favour neither.
+
+## E018: Short executors for the frequent instructions (2026-11-14)
+
+- **Hypothesis**: g86m spends about 280 host instructions per guest instruction on the Linux
+  boot where rustx86 spends 171, and the difference is that rustx86 gives its most frequent
+  instructions an executor of their own, reached straight from the decode cache, while g86m's
+  cache only saves the parsing and then runs the general code (the `match` on the opcode, the
+  width tests, the general operand access). Counted on the boot: `89` and `8B` (the 32-bit MOVs)
+  are 28% of all instructions; the arithmetic grid about 17%; conditional jumps about 11%; `83`
+  5.6%; MOVZX 5.5%; LEA 3.8%; the shifts 5.8%. Only 3.2% of instructions have a prefix. With
+  executors for those, for 32-bit code with no prefix, the boot goes below 400 billion host
+  instructions (it is 466 billion).
+- **What changed since last time**: E017's entry said what was parsed. Now an entry can also
+  say what kind of instruction it is, and for those kinds holds everything needed: the operand,
+  the immediate, the length. The kind is worked out the second time an instruction is met, from
+  what the first execution recorded, so the first execution is always the general one. The
+  executors call the same helpers as the general code (`alu`, `shift`, `cond`, the segment
+  access), so there is one implementation of what an instruction means.
+- **Next move for each result**:
+  - Below 400 billion → keep; count again which opcodes are still general and add the next ones
+    while each addition measurably lowers the count
+  - Above 400 billion → the executors themselves are too long; list one (`mov eax, [ebx+8]`) on
+    the micro-benchmark and shorten it
+  - A test fails → run with `--no-decode-cache`; if that passes, the first differing trace line
+    names the instruction whose executor differs from the general code
+- **Cut-off**: The same day. `tools/difftest.sh` at 47 of 47, test386 byte for byte, the boot at
+  exactly 1,651,240,001 instructions. The trace tests do not exercise these executors much (they
+  are 16-bit code, where an instruction is only cached, not specialised), so a 32-bit protected
+  mode trace test is added that runs each kind at least twice.
+
+### Result
+
+2026-11-14. **The hypothesis held: 313 billion host instructions on the boot, against a target of
+400 (it was 466).** Release build, median of three:
+
+| Benchmark | Before | After | Change |
+|---|---:|---:|---:|
+| Linux boot to the shell prompt | 27.3 s, 466 billion host instructions | 20.0 s, 313 billion | 27% less time, 33% fewer instructions |
+| test386 | 1285 ms, 25.8 billion | 1194 ms, 23.7 billion | 7% less time |
+| bench.bin (real mode) | 4220 ms, 90.2 billion | 4658 ms, 97.3 billion | 10% more time |
+
+The boot still takes 1,651,240,001 guest instructions; `tools/difftest.sh` is at 48 of 48 (one
+more: `u_short`); test386 is byte for byte the reference.
+
+On the boot, in order:
+
+| Step | Host instructions |
+|---|---:|
+| Before | 466 billion |
+| 21 kinds: the 32-bit MOVs, the arithmetic grid, `83` and `81`, LEA, TEST, the shifts, Jcc, JMP, CALL, RET, NOP, PUSH, POP, INC, DEC, MOV r,imm, MOVZX | 387 billion |
+| 10 more: the byte MOVs, byte arithmetic and TEST, TEST with an immediate, IMUL, SETcc | 377 billion |
+| The short path in a small function of its own, in front of the general one | 362 billion |
+| A run of short instructions executed without returning to the run loop | 312 billion |
+| The outer function reduced to a choice, so that 16-bit code does not pay for the short path | 313 billion |
+
+- **The run of instructions changed what the guest saw, once.** The first version took 420,000
+  more guest instructions to reach the prompt. An instruction after STI runs with interrupts
+  held off for that one instruction; a run that started there went on past the point where the
+  interrupt was due. A run now ends after such an instruction. The instruction count was what
+  showed it: every test passed
+- **The 16-bit benchmark is 10% slower**, and the cause is known: every instruction now passes
+  a test for "32-bit code with nothing pending" before the general path. With the short path
+  inside the outer function it was 27% slower, because 16-bit code then paid for two function
+  entries; making the outer function only choose brought it to 10% at no cost to the boot. What
+  remains was accepted: the 16-bit guests run paced against real time and have been faster than
+  they need to be since E005
+- `u_short` runs each kind four times in 32-bit protected mode (general, classified, then twice
+  by its executor) and matches rustx86 over 308 lines. With one executor deliberately wrong it
+  fails at line 152, in the third pass, where the executors start
+
+Host instructions per guest instruction now: NOP 126, `mov eax, edx` 135, `mov eax, [ebx+8]` 202,
+`add eax, edx` 185 (measured before the run of instructions was added, which removes about 30
+more from each when they follow one another). The boot averages 189.
+
+### Addendum: is the difference from rustx86 a matter of design? (the owner's experiment)
+
+The comparison in E017 showed g86m ahead on 16-bit code and on test386 and behind on the Linux
+boot, and put that down to rustx86's short executors. The owner pointed out that this was an
+inference: the three workloads are different mixes of instructions, with more paging and more
+interrupts in the boot, so the code generated for the two languages could still be what differs.
+The experiment that separates the two: switch rustx86's executors off and boot Linux with it. If
+it then costs about what g86m cost without executors (about 280 per guest instruction), the
+difference is design.
+
+rustx86 was built with its decode cache bypassed (the path it takes when its debugger is on:
+every instruction through its general `step`) and booted the same kernel:
+
+| | Guest instructions | Host instructions | Per guest instruction | Time |
+|---|---:|---:|---:|---:|
+| rustx86, as built | 1,500 million | 257 billion | 171 | 16.1 s |
+| rustx86, decode cache bypassed | 1,500 million | 853 billion | 568 | 51.8 s |
+| g86m before E018 (parse cache, no executors) | 1,647 million | 465 billion | 282 | 27.3 s |
+| g86m after E018 | 1,647 million | 311 billion | 189 | 20.6 s |
+
+The serial output of the two rustx86 runs has the same checksum, so the bypass changed nothing
+but the speed.
+
+**It did not fall to 280; it fell to 568.** So the answer is stronger than the question asked
+for. rustx86's general path is twice as costly as g86m's on this workload, as it is on the
+16-bit benchmark (389 against 244): everything rustx86 has on the boot comes from its executors,
+which take it from 568 to 171. Nothing here suggests that Goose's generated code is what holds
+g86m back; at the same level of design the Goose interpreter is the leaner one, and with
+executors g86m is at 189 against rustx86's 171.
+
+What this does not show: that the two general paths are equally well written. rustx86's saves a
+352-byte copy of the CPU for every instruction on that path, which g86m's 128-byte copy does
+not; some of the 568 is that. The comparison is between two programs, not two compilers.

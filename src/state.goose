@@ -141,7 +141,7 @@ struct Pre {
     lock: bool,          // the instruction has a LOCK prefix
     rep: u8,             // 0 none, 1 REPNE (F2), 2 REP/REPE (F3)
     seg: i8,             // segment override: -1 none, else ES CS SS DS FS GS
-    spare: u8,
+    kind: u8,            // which short executor runs this instruction: 0 not yet known, 255 none
 }
 
 struct Decoded {
@@ -151,6 +151,7 @@ struct Decoded {
     tag: u32,            // the instruction's linear address; FFFFFFFFh for an empty entry
     m: u32,              // the operand, once the instruction has asked for it
     disp: u32,           // the operand's displacement
+    imm: u32,            // for an instruction with a short executor: its immediate or its branch offset
 }
 
 let DC_HALF = 8192;      // entries for 16-bit code segments, then as many for 32-bit ones

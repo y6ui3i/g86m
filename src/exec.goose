@@ -19,7 +19,7 @@ import fpu;
 // ---- Decode state that lives for one instruction ----
 
 // What the prefixes and the opcode of the instruction being executed say (see Pre in state.goose).
-var ins: Pre = Pre { op: 0, plen: 0, osz: 16, asz32: false, lock: false, rep: 0, seg: -1, spare: 0 };
+var ins: Pre = Pre { op: 0, plen: 0, osz: 16, asz32: false, lock: false, rep: 0, seg: -1, kind: 0 };
 var ea_seg = 3;              // segment register of the effective address (starts as DS)
 var dc_cur = -1;             // this instruction's entry in the decode cache, or -1 when it has none
 var ea_off: u32 = 0;
@@ -890,6 +890,233 @@ fn two_byte() {
     }
 }
 
+// ---- Short executors ----
+//
+// The instructions a 32-bit program runs most, each with a few lines of its own, reached
+// straight from the decode cache instead of through the general dispatch. Only instructions of
+// a 32-bit code segment with no prefix qualify, so the operand is 32 bits wide and addresses
+// are 32-bit; everything else, and every instruction the first time it is met, takes the general
+// path. What an instruction means is still said once: the executors call the same alu, shift,
+// cond and segment access as the general code.
+//
+// For these the entry holds, besides the operand: the immediate or branch offset (imm), and in
+// bits 26 to 29 of m the length of the whole instruction, which the mask then covers.
+let K_NONE = 255;
+let K_MOV_R_RM = 1;      // 8B
+let K_MOV_RM_R = 2;      // 89
+let K_ALU_RM_R = 3;      // 01 09 11 19 21 29 31 39
+let K_ALU_R_RM = 4;      // 03 0B 13 1B 23 2B 33 3B
+let K_ALU_RM_I = 5;      // 83 and 81
+let K_LEA = 6;           // 8D
+let K_TEST = 7;          // 85
+let K_SHIFT_I = 8;       // C1
+let K_SHIFT_CL = 9;      // D3
+let K_JCC = 10;          // 70 to 7F, and 0F 80 to 0F 8F; the condition is in disp
+let K_JMP = 11;          // EB, E9
+let K_CALL = 12;         // E8
+let K_RET = 13;          // C3
+let K_NOP = 14;          // 90
+let K_PUSH = 15;         // 50 to 57
+let K_POP = 16;          // 58 to 5F
+let K_INC = 17;          // 40 to 47
+let K_DEC = 18;          // 48 to 4F
+let K_MOV_R_I = 19;      // B8 to BF
+let K_MOVZX8 = 20;       // 0F B6
+let K_MOVZX16 = 21;      // 0F B7
+let K_MOV8_R_RM = 22;    // 8A
+let K_MOV8_RM_R = 23;    // 88
+let K_ALU8_RM_R = 24;    // 00 08 10 18 20 28 30 38
+let K_ALU8_R_RM = 25;    // 02 0A 12 1A 22 2A 32 3A
+let K_ALU8_RM_I = 26;    // 80
+let K_TEST8 = 27;        // 84
+let K_TEST8_I = 28;      // F6 /0 and /1
+let K_TEST_I = 29;       // F7 /0 and /1
+let K_IMUL = 30;         // 0F AF
+let K_SETCC = 31;        // 0F 90 to 0F 9F; the condition is in imm
+
+// Byte k of the instruction, from its first eight.
+inline fn raw8(raw: u64, k: u32) -> u32 { return (raw >> (k * 8) & 0xFF) as! u32; }
+inline fn raw32(raw: u64, k: u32) -> u32 { return (raw >> (k * 8) & 0xFFFFFFFF) as! u32; }
+inline fn sext8(v: u32) -> u32 { return ((v as! u8) as! i8) as! u32; }
+
+// Decides whether the instruction in this entry has a short executor. Called the second time
+// the instruction is met: by then the first, general, execution has recorded its operand.
+fn classify(slot: i64, raw: u64) {
+    var kind: u8 = K_NONE;
+    var len: u32 = 0;
+    var imm: u32 = 0;
+    var cc: u32 = 0;
+    let op = ins.op;
+    let mm = dc[slot].m;
+    let has_m = mm & 3 == 1;
+    let after_m = 1 + (mm >> 10 & 15);       // where the operand's bytes end, for a one-byte opcode
+    if ins.plen == 1 && ins.osz == 32 && ins.asz32 {
+        if has_m {
+            len = after_m;
+            if op == 0x8B { kind = K_MOV_R_RM; }
+            else if op == 0x89 { kind = K_MOV_RM_R; }
+            else if op < 0x40 && op & 7 == 1 { kind = K_ALU_RM_R; }
+            else if op < 0x40 && op & 7 == 3 { kind = K_ALU_R_RM; }
+            else if op == 0x83 { kind = K_ALU_RM_I; imm = sext8(raw8(raw, after_m)); len = after_m + 1; }
+            else if op == 0x81 && after_m <= 4 { kind = K_ALU_RM_I; imm = raw32(raw, after_m); len = after_m + 4; }
+            else if op == 0x8D && mm & 0x0C != 0x0C { kind = K_LEA; }
+            else if op == 0x85 { kind = K_TEST; }
+            else if op == 0xC1 { kind = K_SHIFT_I; imm = raw8(raw, after_m); len = after_m + 1; }
+            else if op == 0xD3 { kind = K_SHIFT_CL; }
+            else if op == 0x8A { kind = K_MOV8_R_RM; }
+            else if op == 0x88 { kind = K_MOV8_RM_R; }
+            else if op < 0x40 && op & 7 == 0 { kind = K_ALU8_RM_R; }
+            else if op < 0x40 && op & 7 == 2 { kind = K_ALU8_R_RM; }
+            else if op == 0x80 { kind = K_ALU8_RM_I; imm = raw8(raw, after_m); len = after_m + 1; }
+            else if op == 0x84 { kind = K_TEST8; }
+            else if op == 0xF6 && mm >> 4 & 7 < 2 { kind = K_TEST8_I; imm = raw8(raw, after_m); len = after_m + 1; }
+            else if op == 0xF7 && mm >> 4 & 7 < 2 && after_m <= 4 { kind = K_TEST_I; imm = raw32(raw, after_m); len = after_m + 4; }
+            else if op == 0x0F {
+                // A two-byte opcode: the operand's bytes start one later, and its recorded length
+                // was counted from after the second opcode byte.
+                let op2 = raw8(raw, 1);
+                len = after_m + 1;
+                if op2 == 0xB6 { kind = K_MOVZX8; } else if op2 == 0xB7 { kind = K_MOVZX16; }
+                else if op2 == 0xAF { kind = K_IMUL; }
+                else if op2 >= 0x90 && op2 <= 0x9F { kind = K_SETCC; imm = op2 & 15; }
+            }
+        } else if mm == 0 {
+            if op >= 0x70 && op <= 0x7F { kind = K_JCC; cc = op & 15; imm = sext8(raw8(raw, 1)); len = 2; }
+            else if op == 0xEB { kind = K_JMP; imm = sext8(raw8(raw, 1)); len = 2; }
+            else if op == 0xE9 { kind = K_JMP; imm = raw32(raw, 1); len = 5; }
+            else if op == 0xE8 { kind = K_CALL; imm = raw32(raw, 1); len = 5; }
+            else if op == 0xC3 { kind = K_RET; len = 1; }
+            else if op == 0x90 { kind = K_NOP; len = 1; }
+            else if op >= 0x50 && op <= 0x57 { kind = K_PUSH; len = 1; }
+            else if op >= 0x58 && op <= 0x5F { kind = K_POP; len = 1; }
+            else if op >= 0x40 && op <= 0x47 { kind = K_INC; len = 1; }
+            else if op >= 0x48 && op <= 0x4F { kind = K_DEC; len = 1; }
+            else if op >= 0xB8 && op <= 0xBF { kind = K_MOV_R_I; imm = raw32(raw, 1); len = 5; }
+            else if op == 0x0F {
+                let op2 = raw8(raw, 1);
+                if op2 >= 0x80 && op2 <= 0x8F { kind = K_JCC; cc = op2 & 15; imm = raw32(raw, 2); len = 6; }
+            }
+        }
+    }
+    if kind != K_NONE && len <= 8 {
+        dc[slot].imm = imm;
+        if kind == K_JCC { dc[slot].disp = cc; }
+        dc[slot].m = mm | len << 26;
+        dc[slot].mask = byte_mask(len);
+        dc[slot].pre.kind = kind;
+    } else {
+        dc[slot].pre.kind = K_NONE;
+    }
+}
+
+// The 32-bit operand of a short instruction: a register, or memory at the address the entry
+// describes. short_ea must have run first for the memory case.
+inline fn short_ea(mm: u32, slot: i64) {
+    if mm & 0x0C != 0x0C { ea_from(mm, dc[slot].disp); }
+}
+
+inline fn short_read(mm: u32) -> u32 {
+    if mm & 0x0C == 0x0C { return cpu.regs[mm >> 7 & 7]; }
+    return seg_read(ea_seg, ea_off, 32);
+}
+
+inline fn short_write(mm: u32, v: u32) {
+    if mm & 0x0C == 0x0C { cpu.regs[mm >> 7 & 7] = v; }
+    else { seg_write(ea_seg, ea_off, 32, v); }
+}
+
+inline fn short_read8(mm: u32) -> u32 {
+    if mm & 0x0C == 0x0C { return r8((mm >> 7 & 7) as! u8); }
+    return seg_read(ea_seg, ea_off, 8);
+}
+
+inline fn short_write8(mm: u32, v: u32) {
+    if mm & 0x0C == 0x0C { set_r8((mm >> 7 & 7) as! u8, v as! u8); }
+    else { seg_write(ea_seg, ea_off, 8, v); }
+}
+
+inline fn run_short(kind: u8, slot: i64) {
+    let mm = dc[slot].m;
+    let imm = dc[slot].imm;
+    let reg = mm >> 4 & 7;
+    cpu.ip = dc_ip0 + (mm >> 26 & 15);
+    match kind {
+        1 => { short_ea(mm, slot); cpu.regs[reg] = short_read(mm); },
+        2 => { short_ea(mm, slot); short_write(mm, cpu.regs[reg]); },
+        3 => {
+            let aop = ins.op >> 3;
+            short_ea(mm, slot);
+            let r = alu(aop, short_read(mm), cpu.regs[reg], 32);
+            if aop != 7 { short_write(mm, r); }
+        },
+        4 => {
+            let aop = ins.op >> 3;
+            short_ea(mm, slot);
+            let r = alu(aop, cpu.regs[reg], short_read(mm), 32);
+            if aop != 7 { cpu.regs[reg] = r; }
+        },
+        5 => {
+            let aop = reg as! u8;
+            short_ea(mm, slot);
+            let r = alu(aop, short_read(mm), imm, 32);
+            if aop != 7 { short_write(mm, r); }
+        },
+        6 => { ea_from(mm, dc[slot].disp); cpu.regs[reg] = ea_off; },
+        7 => { short_ea(mm, slot); alu(4, short_read(mm), cpu.regs[reg], 32); },
+        8 => { short_ea(mm, slot); short_write(mm, shift(reg as! u8, short_read(mm), imm as! u8, 32)); },
+        9 => { short_ea(mm, slot); short_write(mm, shift(reg as! u8, short_read(mm), r8(1), 32)); },
+        10 => { if cond(dc[slot].disp as! u8) { cpu.ip += imm; } },
+        11 => { cpu.ip += imm; },
+        12 => { push_w(cpu.ip, 32); cpu.ip += imm; },
+        13 => { cpu.ip = pop_w(32); },
+        14 => {},
+        15 => { push_w(cpu.regs[ins.op & 7], 32); },
+        16 => { let v = pop_w(32); cpu.regs[ins.op & 7] = v; },
+        17 => { cpu.regs[ins.op & 7] = inc(cpu.regs[ins.op & 7], 32); },
+        18 => { cpu.regs[ins.op & 7] = dec(cpu.regs[ins.op & 7], 32); },
+        19 => { cpu.regs[ins.op & 7] = imm; },
+        20 => {
+            if mm & 0x0C == 0x0C { cpu.regs[reg] = r8((mm >> 7 & 7) as! u8); }
+            else { ea_from(mm, dc[slot].disp); cpu.regs[reg] = seg_read(ea_seg, ea_off, 8); }
+        },
+        21 => {
+            if mm & 0x0C == 0x0C { cpu.regs[reg] = cpu.regs[mm >> 7 & 7] & 0xFFFF; }
+            else { ea_from(mm, dc[slot].disp); cpu.regs[reg] = seg_read(ea_seg, ea_off, 16); }
+        },
+        22 => { short_ea(mm, slot); set_r8(reg as! u8, short_read8(mm) as! u8); },
+        23 => { short_ea(mm, slot); let v: u32 = r8(reg as! u8); short_write8(mm, v); },
+        24 => {
+            let aop = ins.op >> 3;
+            short_ea(mm, slot);
+            let b: u32 = r8(reg as! u8);
+            let r = alu(aop, short_read8(mm), b, 8);
+            if aop != 7 { short_write8(mm, r); }
+        },
+        25 => {
+            let aop = ins.op >> 3;
+            short_ea(mm, slot);
+            let a: u32 = r8(reg as! u8);
+            let r = alu(aop, a, short_read8(mm), 8);
+            if aop != 7 { set_r8(reg as! u8, r as! u8); }
+        },
+        26 => {
+            let aop = reg as! u8;
+            short_ea(mm, slot);
+            let r = alu(aop, short_read8(mm), imm, 8);
+            if aop != 7 { short_write8(mm, r); }
+        },
+        27 => { short_ea(mm, slot); let b: u32 = r8(reg as! u8); alu(4, short_read8(mm), b, 8); },
+        28 => { short_ea(mm, slot); alu(4, short_read8(mm), imm, 8); },
+        29 => { short_ea(mm, slot); alu(4, short_read(mm), imm, 32); },
+        30 => {
+            short_ea(mm, slot);
+            let p = imul(cpu.regs[reg], short_read(mm), 32);
+            cpu.regs[reg] = p as! u32;
+        },
+        _ => { short_ea(mm, slot); short_write8(mm, if cond(imm as! u8) { 1 } else { 0 }); },
+    }
+}
+
 // May the instruction with opcode op carry a LOCK prefix? Only a short list may, and only with a
 // memory destination: the ALU operations that write, NOT, NEG, INC, DEC, XCHG, and the bit
 // instructions that write. Anything else with LOCK is an invalid opcode. This looks at the bytes
@@ -930,7 +1157,54 @@ var pending_vec: u8 = 0;
 var pending_has_err = false;
 
 // One instruction, or the delivery of a pending fault. False when a fault cut it short.
+// One instruction, or a run of them. Most of the time the instruction is one of 32-bit code that
+// the decode cache knows and has a short executor for, with no fault or interrupt waiting. That
+// case is handled here, in a function kept small; everything else is exec_general's.
+//
+// After a short executor the function does not return if the next instruction can be taken the
+// same way: it counts the one just done, notes where the next begins, and goes on. Short
+// executors touch no device and change no segment, so nothing that the run loop watches for can
+// happen in between, except that virtual time reaches chain_until, the moment the run loop
+// worked out that something else is due. The last instruction of a run is left for the caller to
+// count, as a single instruction would be.
+var chain_until = 0;
+
+// Runs short executors for as long as it can. True when it ran at least one instruction and the
+// last one is still to be counted by the caller; false when the instruction at hand is not one
+// of them, and nothing has been done about it.
+fn exec_short() -> bool {
+    loop {
+        let a = cpu.base[CS] + cpu.ip;
+        let lim = cpu.limit[CS];
+        if !(a >> 12 == code_page && code_ok && a & 0xFFF <= 0xFF0 && lim >= 15 && cpu.ip <= lim - 15) { return false; }
+        let slot: i64 = a & (DC_HALF - 1) | DC_HALF;
+        let kind = dc[slot].pre.kind;
+        if dc[slot].tag != a || kind == 0 || kind == K_NONE { return false; }
+        let raw = code64(code_phys | a & 0xFFF);
+        if (raw ^ dc[slot].bytes) & dc[slot].mask != 0 { return false; }
+        // If interrupts were being held off for this one instruction, an interrupt may be
+        // due straight after it: no run then.
+        let held = shadow;
+        shadow = false;
+        dc_ip0 = cpu.ip;
+        ins = dc[slot].pre;
+        run_short(kind, slot);
+        if held || vtime + 1 >= chain_until { return true; }       // no short executor changes CS
+        vtime += 1;
+        saved = cpu;
+    }
+}
+
+// This function only chooses, so that it needs no registers of its own and costs next to nothing
+// to enter: 16-bit code goes straight to exec_general.
 fn exec_one() -> bool {
+    if code32() && dc_on && !pending && !(irq_line && flag(IF) && !shadow) {
+        if exec_short() { return true; }
+    }
+    return exec_general();
+}
+
+fn exec_general() -> bool {
     if pending {
         pending = false;
         deliver(pending_vec, false, pending_has_err, pending_err);
@@ -975,6 +1249,12 @@ fn exec_one() -> bool {
             dc_cur = slot;
             ins = dc[slot].pre;
             op = ins.op;
+            // An instruction with a short executor is run here and now, and that is all of it.
+            let kind = ins.kind;
+            if kind < K_NONE {
+                if kind != 0 { run_short(kind, slot); return true; }
+                classify(slot, raw);
+            }
             cpu.ip += ins.plen;
         }
     }
@@ -1015,6 +1295,7 @@ fn exec_one() -> bool {
             ins.plen = plen as! u8;
             dc[slot].bytes = raw;
             dc[slot].mask = byte_mask(plen);
+            ins.kind = 0;
             dc[slot].pre = ins;
             dc[slot].tag = a;
             dc[slot].m = 0;
