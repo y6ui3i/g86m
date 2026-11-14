@@ -1335,3 +1335,35 @@ Where that leaves the three benchmarks, against main after E015:
 | bench.bin (real mode) | 4449 ms | 4220 ms | 5% less time |
 
 47 of 47; test386 byte for byte; the boot at 1,651,240,001 instructions.
+
+### Addendum: against rustx86, on the same machine
+
+2026-11-14. rustx86 (commit 64aba23, release build) and g86m (this branch) run the same three
+workloads from the same image files. Host instructions are from `/usr/bin/time -l`.
+
+| Workload | | rustx86 | g86m |
+|---|---|---:|---:|
+| bench.bin, 369 million instructions, 16-bit real mode | time | 6.8 s (54 MIPS) | 4.2 s (87 MIPS) |
+| | host instructions per guest instruction | 389 | 244 |
+| test386, 104.5 million instructions | time | 1.68 s | 1.29 s |
+| | host instructions per guest instruction | 280 | 247 |
+| Linux boot to "busybox shell" | guest instructions | 1,500 million | 1,647 million |
+| | time, interpreter | 16.1 s (93 MIPS) | 27.3 s (60 MIPS) |
+| | host instructions per guest instruction | 171 | 282 |
+| | time, rustx86 with its JIT | 11.4 s | - |
+
+**g86m is faster where rustx86 has no decode cache, and slower where it has one.** rustx86's
+cache covers 32-bit code only and leaves 16-bit code, prefixed instructions and the less common
+opcodes to its ordinary path; that is why it is at 389 and 280 on the first two and 171 on the
+third. g86m is between 244 and 282 on all three.
+
+The two caches are not the same kind. g86m's remembers how an instruction parses, and then goes
+through the same `match` on the opcode and the same general code as before. rustx86's turns the
+most frequent instructions (the two MOVs, the arithmetic grid, the conditional jumps, LEA, the
+shifts, MOVZX, TEST: chosen by counting opcodes over a Linux boot) into a small operation each
+with its own short executor, and the rest fall back. The difference between 282 and 171 is what
+that buys.
+
+The guest instruction counts differ (rustx86 runs 256 instructions per timer tick, g86m 64) and
+rustx86's count is rounded up to its 10-million-instruction check, so the times are comparable
+and the per-instruction figures slightly favour neither.
