@@ -24,8 +24,10 @@ instruction boundary. The history and the numbers are in
 [docs/experiments.md](docs/experiments.md); what Goose did that cost time is in
 [docs/goose-notes.md](docs/goose-notes.md).
 
-How the first day went is written up in a blog post (in Japanese):
-[Goose で x86 エミュレータを書き直す](https://pocraft.net/?p=957).
+Two blog posts (in Japanese) tell how it went: the first day, to ELKS and FreeDOS, in
+[Goose で x86 エミュレータを書き直す](https://pocraft.net/?p=957), and the two days after, from
+test386 to Linux, in
+[Goose の x86 エミュレータで Linux を起動する](https://pocraft.net/?p=962).
 
 | Stage | Goal | State |
 |---|---|---|
