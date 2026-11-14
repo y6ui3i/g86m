@@ -130,3 +130,8 @@ these cases. The first two were found on its 8086 profile, the rest on its 32-bi
   differs from `2^64`, which needs a 64-bit mantissa. With f64 registers it never differs, so
   `printf '%g' 0.1` gives `0.0999999`. g86m did this with f64 registers (E013) and stopped when
   its arithmetic moved to the 80-bit format (E014); rustx86 has f64 registers.
+- **REP MOVSD and REP MOVSW with the destination less than one element above the source copy
+  byte by byte.** Each element should be read whole, then written; a later read then sees part
+  of an earlier write. For `11 22 33 44 55 66 77 88 99`, two dwords, destination one byte up,
+  the result should be `11 11 22 33 44 44 66 77 88`; rustx86 gives the bytes a byte-wise copy
+  gives (E020)

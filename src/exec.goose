@@ -342,13 +342,87 @@ fn addr_reg_add(i: u8, d: u32) {
 
 // ---- String instructions (A4..A7, AA..AF, 6C..6F) ----
 
+// A data segment that is valid, writable, starts anywhere and covers all 4 GB: no access to it
+// can fail the segment check.
+inline fn flat_data(sg: i64) -> bool {
+    return cpu.limit[sg] == 0xFFFFFFFF && (cpu.attr[sg] & (A_VALID | A_CODE | A_DOWN_CONF | A_RW)) == (A_VALID | A_RW);
+}
+
+// REP MOVS and REP STOS going upward, as many elements at once as lie within one page of the
+// source and one page of the destination, with one translation for each. Element by element, in
+// order, exactly as the instruction does it, so that overlapping regions come out the same; what
+// is saved is the segment check, the translation and the bookkeeping per element. Stops, having
+// done what it could, at anything it does not handle: an element that straddles a page, memory
+// outside RAM or where physical addresses wrap, a segment that is not flat. The caller's loop then does one element the ordinary
+// way and tries this again. A page fault here leaves the registers at the last whole run.
+fn string_bulk(movs: bool, src: i64, w: u8) {
+    if !flat_data(ES) || (movs && !flat_data(src)) { return; }
+    let nb: u32 = ((w as u32) >> 3);
+    let sh: u32 = if w == 8 { 0 } else if w == 16 { 1 } else { 2 };
+    loop {
+        var n = cpu.regs[CX];
+        if n == 0 { return; }
+        let dl = cpu.base[ES] + cpu.regs[DI];
+        let room_d = (0x1000 - (dl & 0xFFF)) >> sh;
+        if room_d < n { n = room_d; }
+        var sl: u32 = 0;
+        if movs {
+            sl = cpu.base[src] + cpu.regs[SI];
+            let room_s = (0x1000 - (sl & 0xFFF)) >> sh;
+            if room_s < n { n = room_s; }
+        }
+        if n == 0 { return; }
+        // The page must be in RAM and below the point where physical addresses wrap.
+        let dpage = page_write(dl);
+        if dpage >= RAM_SIZE - 4096 || dpage > phys_mask - 0xFFF { return; }
+        let dp: i64 = dpage | dl & 0xFFF;
+        let v = cpu.regs[AX];
+        if movs {
+            let spage = page_read(sl);
+            if spage >= RAM_SIZE - 4096 || spage > phys_mask - 0xFFF { return; }
+            let sp: i64 = spage | sl & 0xFFF;
+            if w == 32 {
+                for k in n {
+                    let at = k << 2;
+                    let b0 = ram[sp + at]; let b1 = ram[sp + at + 1]; let b2 = ram[sp + at + 2]; let b3 = ram[sp + at + 3];
+                    ram[dp + at] = b0; ram[dp + at + 1] = b1; ram[dp + at + 2] = b2; ram[dp + at + 3] = b3;
+                }
+            } else if w == 16 {
+                for k in n {
+                    let at = k << 1;
+                    let b0 = ram[sp + at]; let b1 = ram[sp + at + 1];
+                    ram[dp + at] = b0; ram[dp + at + 1] = b1;
+                }
+            } else {
+                for k in n { ram[dp + k] = ram[sp + k]; }
+            }
+            cpu.regs[SI] += n << sh;
+        } else if w == 32 {
+            for k in n {
+                let at = k << 2;
+                ram[dp + at] = v as! u8; ram[dp + at + 1] = (v >> 8) as! u8; ram[dp + at + 2] = (v >> 16) as! u8; ram[dp + at + 3] = (v >> 24) as! u8;
+            }
+        } else if w == 16 {
+            for k in n { let at = k << 1; ram[dp + at] = v as! u8; ram[dp + at + 1] = (v >> 8) as! u8; }
+        } else {
+            for k in n { ram[dp + k] = v as! u8; }
+        }
+        cpu.regs[DI] += n << sh;
+        cpu.regs[CX] -= n;
+        // A repeated instruction that faults part-way resumes from where it got to.
+        saved.regs = cpu.regs;
+    }
+}
+
 fn string_op(op: u8) {
     let w = width(op);
     let n: u32 = ((w as u32) >> 3);
     let d: u32 = if flag(DF) { 0 - n } else { n };
     let kind = op & 0xFE;
     let src = seg_of(DS);
+    let bulk = ins.rep == 2 && ins.asz32 && !flag(DF) && (kind == 0xA4 || kind == 0xAA);
     loop {
+        if bulk { string_bulk(kind == 0xA4, src, w); }
         if ins.rep != 0 && addr_reg(CX) == 0 { break; }
         match kind {
             0xA4 => {
