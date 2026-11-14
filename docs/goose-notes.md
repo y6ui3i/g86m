@@ -91,7 +91,7 @@ for the total, a debugger stepping one instruction for the detail). See E010 in
 # Found in rustx86
 
 Behaviour of rustx86 that turned up while comparing g86m's tests with it. g86m does not follow it in
-these cases. The first two were found on its 8086 profile, the last two on its 32-bit profile.
+these cases. The first two were found on its 8086 profile, the rest on its 32-bit profile.
 
 - **IDIV of -32768 by -1 panics.** `attempt to divide with overflow` at `core/src/cpu/group.rs:79`.
   Reproduced with the 8-bit form (`AX=8000h`, divisor `FFh`). The specified behaviour is a divide
@@ -104,4 +104,10 @@ these cases. The first two were found on its 8086 profile, the last two on its 3
   where the manual has it signed
 - **IRETD in real mode pops 16-bit values.** The operand-size prefix is ignored on that path, so
   three words are popped instead of three dwords
-
+- **FLD ST(i), FXCH and FSTP ST(i) drop the low 11 bits of an 80-bit value.** A value loaded with
+  `FLD m80` keeps its 64 mantissa bits only until it is copied to another register; the copy has
+  the 53 of an f64. Storing the copy with `FSTP m80` shows it. Real hardware copies all 80 bits.
+  Seen for `FLD ST(0)`; its code does the same for the other two
+- **Expected, not run: printf rounds floats down.** musl's printf asks whether `2^64 + small`
+  differs from `2^64`, which needs a 64-bit mantissa. With f64 registers it never differs, so
+  `printf '%g' 0.1` gives `0.0999999`. g86m does this (E013), and rustx86 has the same registers.

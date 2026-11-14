@@ -11,15 +11,19 @@
 
 static struct termios saved;
 static int raw_on = 0;
+static int alt_on = 0;      // the alternate screen is up, not only raw mode
 
 // Leaves the alternate screen, shows the cursor and resets colours. Only async-signal-safe calls,
 // since it also runs from the signal handler.
 static void restore(void) {
     if (!raw_on) return;
     raw_on = 0;
-    static const char leave[] = "\x1b[0m\x1b[?25h\x1b[?1049l\x1b[23;0t";
-    ssize_t r = write(STDOUT_FILENO, leave, sizeof leave - 1);
-    (void)r;
+    if (alt_on) {
+        static const char leave[] = "\x1b[0m\x1b[?25h\x1b[?1049l\x1b[23;0t";
+        ssize_t r = write(STDOUT_FILENO, leave, sizeof leave - 1);
+        (void)r;
+        alt_on = 0;
+    }
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved);
 }
 
@@ -30,8 +34,9 @@ static void on_signal(int sig) {
 
 int32_t con_is_tty(void) { return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO); }
 
-// Puts the terminal in raw mode and switches to the alternate screen. Returns 0 if it cannot.
-int32_t con_open(void) {
+// Puts the terminal in raw mode and leaves the screen alone: for a guest that talks through a
+// serial port, whose output is a stream the terminal itself displays. Returns 0 if it cannot.
+int32_t con_raw(void) {
     if (!con_is_tty() || tcgetattr(STDIN_FILENO, &saved) != 0) return 0;
     struct termios raw = saved;
     cfmakeraw(&raw);
@@ -43,6 +48,13 @@ int32_t con_open(void) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGHUP, on_signal);
+    return 1;
+}
+
+// Raw mode and the alternate screen, for drawing the guest's text screen. Returns 0 if it cannot.
+int32_t con_open(void) {
+    if (!con_raw()) return 0;
+    alt_on = 1;
     // Save the window title and put the way out in it, where it costs no screen rows.
     static const char enter[] = "\x1b[22;0t\x1b]0;g86m - Ctrl-] or F12 to quit\x07\x1b[?1049h\x1b[2J\x1b[H";
     ssize_t r = write(STDOUT_FILENO, enter, sizeof enter - 1);

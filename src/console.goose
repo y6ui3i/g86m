@@ -9,6 +9,7 @@ import bios;
 
 extern fn con_is_tty() -> i32;
 extern fn con_open() -> i32;
+extern fn con_raw() -> i32;
 extern fn con_close();
 extern fn con_read() -> i32;
 extern fn con_sleep_us(us: i32);

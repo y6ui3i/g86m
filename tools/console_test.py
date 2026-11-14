@@ -10,6 +10,9 @@ repeats a shorter session on two terminals smaller than 80x25.
 With images/fd14boot.img: boots FreeDOS, presses F5 as a real function key, answers where the
 shell is, and runs `dir`.
 
+With images/vmlinuz-lts and images/initramfs-mini: boots Linux with the terminal as its serial
+console, runs a command, checks that `sleep 3` takes about 3 seconds, and leaves with Ctrl-].
+
 An image that is not there is reported as skipped. Exits 0 when nothing failed.
 
 The console only sends the cells that changed, so its output cannot be read as a stream of text.
@@ -207,7 +210,7 @@ def timing_and_keys(master, screen, wait, has_line, pump, fail):
     return slept, interrupted
 
 
-def start(exe, image, rows, cols):
+def start(exe, image, rows, cols, options=()):
     """Starts g86m on a new pseudo-terminal. Returns (pid, master, slave, modes before)."""
     master, slave = pty.openpty()
     termios.tcsetwinsize(slave, (rows, cols))
@@ -218,7 +221,7 @@ def start(exe, image, rows, cols):
         os.dup2(slave, 0)
         os.dup2(slave, 1)
         os.close(master)
-        os.execv(exe, [exe, image])
+        os.execv(exe, [exe, *options, image])
     return pid, master, slave, before
 
 
@@ -284,6 +287,67 @@ def dos_session(exe, image):
     os.close(slave)
 
 
+def linux_session(exe, kernel, initramfs):
+    """Linux through the serial console: the terminal is the guest's serial port, as a stream."""
+    pid, master, slave, before = start(exe, kernel, 30, 100, ("--initrd", initramfs))
+    seen = b""
+
+    def fail(message):
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        print("FAIL  console linux:", message)
+        for line in seen.decode("utf-8", errors="replace").splitlines()[-12:]:
+            print("    |" + line)
+        sys.exit(1)
+
+    def wait(what, text, timeout):
+        """Waits for text to arrive after what has been seen so far; returns how long it took."""
+        nonlocal seen
+        start_at, t0 = len(seen), time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if text in seen[start_at:]:
+                return time.monotonic() - t0
+            ready, _, _ = select.select([master], [], [], 0.02)
+            if ready:
+                try:
+                    seen += os.read(master, 65536)
+                except OSError:
+                    break
+        fail(f"timed out after {timeout}s waiting for {what}")
+
+    boot = wait("the shell prompt", b"~ # ", 240)
+    os.write(master, b"echo hi-$((6*7))\r")
+    wait("the answer to echo", b"hi-42", 30)
+    wait("the prompt", b"~ # ", 30)
+    os.write(master, b"sleep 3; echo slept\r")
+    slept = wait("the end of sleep 3", b"\nslept", 30)
+    if not 2.5 <= slept <= 4.5:
+        fail(f"sleep 3 took {slept:.2f}s of real time")
+    os.write(master, b"\x1d")                           # Ctrl-]
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], 0.02)
+        if ready:
+            try:
+                os.read(master, 65536)
+            except OSError:
+                pass
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+    else:
+        fail("did not exit within 10s of Ctrl-]")
+    if os.waitstatus_to_exitcode(status) != 0:
+        fail(f"exit status {os.waitstatus_to_exitcode(status)}")
+    if termios.tcgetattr(slave) != before:
+        fail("terminal modes were not restored")
+    os.close(master)
+    os.close(slave)
+    return boot, slept
+
+
 def main():
     exe, images = sys.argv[1], sys.argv[2]
     elks = os.path.join(images, "fd2880.img")
@@ -303,6 +367,13 @@ def main():
         print("ok    console freedos 100x30 (F5 as a function key, shell path, dir)")
     else:
         print("skip  console freedos (fd14boot.img is not there)")
+    kernel = os.path.join(images, "vmlinuz-lts")
+    initramfs = os.path.join(images, "initramfs-mini")
+    if os.path.exists(kernel) and os.path.exists(initramfs):
+        boot, slept = linux_session(exe, kernel, initramfs)
+        print(f"ok    console linux (serial; boot to shell {boot:.1f}s, sleep 3 took {slept:.2f}s, Ctrl-] quits)")
+    else:
+        print("skip  console linux (vmlinuz-lts and initramfs-mini are not there)")
 
 
 main()

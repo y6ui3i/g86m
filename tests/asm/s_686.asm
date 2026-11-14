@@ -1,6 +1,6 @@
 ; Self-check for what the i686 answers about itself; rustx86 claims more features, so these cannot
 ; be compared. Prints "OK" when all pass. Runs on the i686 (--cpu i686).
-;   - CPUID leaf 0 names GenuineIntel; leaf 1 is family 6 with TSC, CX8 and CMOV and nothing else
+;   - CPUID leaf 0 names GenuineIntel; leaf 1 is family 6 with an FPU, TSC, CX8 and CMOV and nothing else
 ;   - RDTSC goes up
 ;   - RDMSR is a general protection fault (vector 13): there are no model-specific registers
 %define CPU686
@@ -21,7 +21,7 @@ start:
     cpuid
     cmp  eax, 0x0633
     jne  .bad
-    cmp  edx, 0x00008110
+    cmp  edx, 0x00008111
     jne  .bad
     rdtsc
     mov  esi, eax
