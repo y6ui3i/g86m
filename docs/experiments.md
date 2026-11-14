@@ -1103,3 +1103,32 @@ interrupt and a BIOS entry (12), resetting the decode state (14), fetching the o
 (about 35), the prefix and LOCK tests (10), the dispatch (10), and the copy of the CPU state in
 the run loop (13). The next step that is not thin is the one this card excluded: not decoding
 the same instruction again every time it runs.
+
+### Addendum: with build time no object
+
+2026-11-14. The owner's answer to the build-time trade-off above was to ignore it: pick what runs
+fastest. So the options that had been held back, or not tried because they cost build time, were
+measured. Median of three runs each; the kept configuration is the first row.
+
+| Variant | Binary | bench.bin | test386 | Linux boot |
+|---|---:|---:|---:|---:|
+| Kept: 57 helpers inline, `decode_modrm` a call | 413 KB | 4423 ms | 1521 ms | 32.2 s |
+| `decode_modrm` inline as well | 859 KB | 5677 ms | 1418 ms | 31.9 s |
+| `decode_modrm` inline for 32-bit addressing, a call for 16-bit | 760 KB | 5769 ms | 1493 ms | 33.1 s |
+| Kept, compiled with `-O3` | 428 KB | 4471 ms | 1419 ms | 32.2 s |
+| Kept, with `-O3 -mcpu=native` | 428 KB | 4533 ms | 1537 ms | 32.7 s |
+| Kept, with a profile of the Linux boot (`-fprofile-instr-use`) | 424 KB | 4952 ms | 1517 ms | 32.5 s |
+
+**Nothing here is faster where it counts.** Inlining `decode_modrm` is 1% on the boot, which is
+inside the run-to-run spread, and costs 28% on the real-mode benchmark; splitting it was worse on
+all three. The compiler's own options do nothing: `-O3`, tuning for this CPU and a profile of the
+boot all land within the noise on the boot, and the profile makes the real-mode benchmark slower.
+(The two `-O3` rows are the same size; test386 differs by 8% between them, which is the size of
+the noise on that benchmark and the reason the boot is the one to go by.)
+
+The flags were passed through `goose build --cc` with a wrapper script that appends them after
+Goose's own `-O2`. The wrapper is not kept, since none of its uses was.
+
+So the configuration stays as it was. Being allowed to spend build time buys nothing at this
+point; the interpreter's remaining cost is in what it does for each instruction, not in how well
+that is compiled.
