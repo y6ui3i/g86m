@@ -1,6 +1,7 @@
 ; The x87 FPU, part 1: loads and stores in every format, arithmetic with memory and register
 ; operands, comparison. The trace has no FPU state, so each result is stored to memory and loaded
-; into EDX:EAX. Runs on the i686 (--cpu i686).
+; into EDX:EAX. The precision control is set to 53 bits, where rustx86's f64 arithmetic is exact;
+; results with 64 bits of mantissa are checked in s_fpu80. Runs on the i686 (--cpu i686).
 %define CPU686
 %include "common.inc"
 %macro G64 0                    ; pop ST(0) into EDX:EAX as a 64-bit real
@@ -16,6 +17,7 @@ start:
     fnstcw [bx]
     mov  cx, [bx]
     fnstsw ax
+    fldcw [si+38]
     fld  dword [si]             ; 1.5
     fld  qword [si+4]           ; 0.1
     fild word [si+12]           ; -7
@@ -47,8 +49,8 @@ start:
     mov  ecx, [bx+4]
     G64
     fld1                        ; arithmetic between registers
-    fldpi
-    fldl2e
+    fld  qword [si+26]
+    fld  qword [si+4]
     fadd st0, st1
     fmul st0, st2
     fsub st1, st0
@@ -135,4 +137,5 @@ data:
     dq 0x0123456789ABCDEF       ; +18
     dq 3.25                     ; +26
     dd 1.0                      ; +34
+    dw 0x027F                   ; +38  53-bit precision
     TAIL

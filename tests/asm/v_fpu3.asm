@@ -46,7 +46,7 @@ start:
     mov  cx, [bx+8]
     fld  tword [si+16]
     G64
-    fldpi                       ; save, which also initialises; restore brings it back
+    fld  dword [si+2]           ; save, which also initialises; restore brings it back
     fld1
     o32 fnsave [bx]
     fnstsw ax
@@ -71,6 +71,6 @@ data:
     dw 0x0B7F                   ; +8   round up
     dw 0x0F7F                   ; +10  round toward zero
     dw 0x007F                   ; +12  24-bit precision
-    dw 0x037F                   ; +14
+    dw 0x027F                   ; +14  53-bit precision, to nearest
     dt 1.2345678901234567890    ; +16
     TAIL
