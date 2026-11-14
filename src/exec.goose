@@ -20,12 +20,15 @@ import fpu;
 
 // What the prefixes and the opcode of the instruction being executed say (see Pre in state.goose).
 var ins: Pre = Pre { op: 0, plen: 0, osz: 16, asz32: false, lock: false, rep: 0, seg: -1, spare: 0 };
+var ea_seg = 3;              // segment register of the effective address (starts as DS)
+var dc_cur = -1;             // this instruction's entry in the decode cache, or -1 when it has none
+var ea_off: u32 = 0;
+var dc_ip0: u32 = 0;         // the instruction pointer at the instruction's first byte
+var pending_err: u32 = 0;
 var shadow = false;          // the instruction just executed holds interrupts off for one more
 var m_mod: u8 = 0;
 var m_reg: u8 = 0;
 var m_rm: u8 = 0;
-var ea_seg = 3;              // segment register of the effective address (starts as DS)
-var ea_off: u32 = 0;
 
 // ---- Fetch ----
 
@@ -153,8 +156,6 @@ let M_SS = 0x01000000;
 let M_A16 = 0x02000000;
 
 var dc_on = true;
-var dc_cur = -1;             // this instruction's entry, or -1 when it has none
-var dc_ip0: u32 = 0;         // the instruction pointer at the instruction's first byte
 
 // Eight bytes of RAM at p, or zero where they are not all there. The range test is here, and
 // written against the constant, so that the compiler can see the eight indexes are in range:
@@ -927,7 +928,6 @@ fn lockable(op: u8) -> bool {
 var pending = false;
 var pending_vec: u8 = 0;
 var pending_has_err = false;
-var pending_err: u32 = 0;
 
 // One instruction, or the delivery of a pending fault. False when a fault cut it short.
 fn exec_one() -> bool {
@@ -940,7 +940,7 @@ fn exec_one() -> bool {
     if irq_line && flag(IF) && !shadow { deliver(pic_ack(), false, false, 0); }
 
     // At a BIOS entry: perform the service instead of fetching an instruction, then IRET.
-    if cpu.ip < 256 && bios_on && cpu.segs[CS] == BIOS_SEG {
+    if bios_on && cpu.ip < 256 && cpu.segs[CS] == BIOS_SEG {
         bios_call(cpu.ip as! u8);
         do_iret(16);
         if bios_idle {

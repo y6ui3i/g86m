@@ -1299,3 +1299,39 @@ immediates are still fetched, and a NOP still costs 169. Goose has no function p
 entry cannot hold "what to run"; it can only hold "what was parsed".
 
 `--no-decode-cache` switches the cache off, for finding a fault in it.
+
+### Addendum: small gains kept
+
+2026-11-14. The cards so far said to take a change out when it gained less than 5%. The owner's
+view is that small gains add up and should be kept, and the numbers bear it out. From now on a
+change stays if it measurably reduces the work, and "measurably" means the host instruction count
+of the Linux boot, which repeats to within 0.01% from run to run, where the time varies by a few
+percent. Four changes, each of which the old rule would have dropped or never tried:
+
+| Change | Host instructions on the boot |
+|---|---:|
+| After the decode cache (above) | 501.4 billion |
+| The globals of `state.goose` and `exec.goose` declared widest first, `Cpu` made 128 bytes | 491.4 billion |
+| At the BIOS-entry test, `bios_on` tested first instead of last | 481.5 billion |
+| The arithmetic flags gathered and written to EFLAGS once per operation; shifts done in one step instead of one bit at a time | 466.3 billion |
+
+- **The aligned globals are E015's rejected idea.** There it was 1.5% on a micro-benchmark and
+  was taken out. Here it is 2% on the boot. Padding in front of the block was tried again at
+  every size from 0 to 7; the odd sizes and none were equally good, so there is none
+- **One reordered condition is 2%.** `cpu.ip < 256 && bios_on && ...` loaded the instruction
+  pointer and compared it on every instruction; under Linux `bios_on` is false and nothing else
+  needs to be looked at. Six host instructions per guest instruction
+- **The flags**: each of six `set_flag` calls read EFLAGS, changed one bit and wrote it back
+- **The shifts** looped once per bit position with a `match` inside the loop. SHL, SHR and SAR
+  are now one step; the rotates still loop. The 4,317 lines of the two shift trace tests match
+  rustx86 as before
+
+Where that leaves the three benchmarks, against main after E015:
+
+| Benchmark | After E015 | Now | Change |
+|---|---:|---:|---:|
+| Linux boot to the shell prompt | 32.3 s, 584 billion | 27.3 s, 466 billion | 15% less time, 20% fewer instructions |
+| test386 | 1511 ms | 1285 ms | 15% less time |
+| bench.bin (real mode) | 4449 ms | 4220 ms | 5% less time |
+
+47 of 47; test386 byte for byte; the boot at 1,651,240,001 instructions.

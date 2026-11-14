@@ -23,10 +23,17 @@ inline fn parity8(v: u32) -> bool {
     return x & 1 == 0;
 }
 
+// The zero, sign and parity bits for a result, as they sit in EFLAGS.
+inline fn szp(r: u32, w: u8) -> u32 {
+    var f: u32 = 0;
+    if r & mask(w) == 0 { f |= ZF; }
+    if r & msb(w) != 0 { f |= SF; }
+    if parity8(r) { f |= PF; }
+    return f;
+}
+
 inline fn set_szp(r: u32, w: u8) {
-    set_flag(ZF, r & mask(w) == 0);
-    set_flag(SF, r & msb(w) != 0);
-    set_flag(PF, parity8(r));
+    cpu.flags = cpu.flags & 0xFFFFFF3B | szp(r, w);
 }
 
 // Sign-extends to i64, for multiply and divide.
@@ -46,30 +53,29 @@ inline fn alu(op: u8, a: u32, b: u32, w: u8) -> u32 {
     let b64: u64 = b;
     let m64: u64 = m;
     var r: u32 = 0;
+    // The six arithmetic flags are gathered here and written to EFLAGS once.
+    var f: u32 = 0;
     match op {
         0, 2 => {
             let c: u64 = if op == 2 && flag(CF) { 1 } else { 0 };
             let full = a64 + b64 + c;
             r = (full & m64) as! u32;
-            set_flag(CF, full > m64);
-            set_flag(OF, (a ^ r) & (b ^ r) & s != 0);
-            set_flag(AF, (a ^ b ^ r) & 0x10 != 0);
+            if full > m64 { f |= CF; }
+            if (a ^ r) & (b ^ r) & s != 0 { f |= OF; }
+            f |= (a ^ b ^ r) & AF;
         },
         3, 5, 7 => {
             let c: u64 = if op == 3 && flag(CF) { 1 } else { 0 };
             r = ((a64 - b64 - c) & m64) as! u32;
-            set_flag(CF, a64 < b64 + c);
-            set_flag(OF, (a ^ b) & (a ^ r) & s != 0);
-            set_flag(AF, (a ^ b ^ r) & 0x10 != 0);
+            if a64 < b64 + c { f |= CF; }
+            if (a ^ b) & (a ^ r) & s != 0 { f |= OF; }
+            f |= (a ^ b ^ r) & AF;
         },
         _ => {
             if op == 1 { r = a | b; } else if op == 4 { r = a & b; } else { r = a ^ b; }
-            set_flag(CF, false);
-            set_flag(OF, false);
-            set_flag(AF, false);
         },
     }
-    set_szp(r, w);
+    cpu.flags = cpu.flags & 0xFFFFF72A | f | szp(r, w);
     return r;
 }
 
@@ -98,6 +104,27 @@ fn shift(kind: u8, v0: u32, count: u8, w: u8) -> u32 {
     var v = v0 & m;
     var cf = flag(CF);
     if kind == 2 || kind == 3 { n = n % ((w as i64) + 1); }
+    let bits: i64 = w;
+    if kind >= 4 {
+        // The shifts, in one step. What the loop below would leave: the last bit shifted out in
+        // CF, and for an arithmetic right shift the sign bit copied into every place vacated.
+        if kind == 5 {
+            cf = n <= bits && v >> (n - 1) & 1 != 0;
+            v = v >> n;
+        } else if kind == 7 {
+            let neg = v & s != 0;
+            if n >= bits { cf = neg; v = if neg { m } else { 0 }; }
+            else {
+                cf = v >> (n - 1) & 1 != 0;
+                v = v >> n;
+                if neg { v |= m << (bits - n) & m; }
+            }
+        } else {
+            cf = n <= bits && v >> (bits - n) & 1 != 0;
+            v = v << n & m;
+        }
+        n = 0;
+    }
     for i in n {
         match kind {
             0 => { cf = v & s != 0; v = (v << 1 | (if cf { 1 } else { 0 })) & m; },

@@ -17,6 +17,11 @@ import std;
 import os;
 import exec;
 
+// Goose packs globals with no padding, in the order they are declared, so a 32-bit one can sit
+// at an odd address, which costs arm64 an extra instruction on each access. The globals of this
+// file and of exec.goose are therefore declared widest first, bytes and booleans last, and Cpu
+// is 128 bytes. Where the block starts depends on the files imported before this one; padding in
+// front of it was tried at every size from 0 to 7 and none was better than none (E017).
 let RAM_SIZE = 134217728;       // 128 MB
 
 let AX = 0; let CX = 1; let DX = 2; let BX = 3;
@@ -49,11 +54,12 @@ struct Cpu {
     cpl: u8,             // current privilege level: 0 in real mode, 3 in virtual-8086 mode
     halted: bool,
     fault: bool,
+    spare: u8,           // makes the size 128 bytes, so that what follows stays aligned
 }
 
 var cpu: Cpu = Cpu { regs: [0; 8], segs: [0; 6], base: [0; 6], limit: [0xFFFF; 6],
                      attr: [0x10093, 0x1009B, 0x10093, 0x10093, 0x10093, 0x10093],
-                     ip: 0, flags: 2, cpl: 0, halted: false, fault: false };
+                     ip: 0, flags: 2, cpl: 0, halted: false, fault: false, spare: 0 };
 // The state the current instruction started from, to go back to when it faults.
 var saved: Cpu = cpu;
 
@@ -68,12 +74,11 @@ var gdtr_limit: u32 = 0;
 var idtr_base: u32 = 0;
 var idtr_limit: u32 = 0x3FF;
 var ldtr_sel: u16 = 0;
+var tr_sel: u16 = 0;
 var ldtr_base: u32 = 0;
 var ldtr_limit: u32 = 0;
-var tr_sel: u16 = 0;
 var tr_base: u32 = 0;
 var tr_limit: u32 = 0;
-var tr_32 = true;            // the task segment is a 32-bit one
 
 // ---- Cached translations ----
 //
@@ -89,7 +94,6 @@ var tr_32 = true;            // the task segment is a 32-bit one
 // of privilege level empties the one-entry caches, which do not record the mode, and nothing else.
 var code_page: u32 = 0xFFFFFFFF;
 var code_phys: u32 = 0;
-var code_ok = false;         // the whole page behind code_phys is in RAM, where the decode cache can read it
 var read_page: u32 = 0xFFFFFFFF;
 var read_phys: u32 = 0;
 var write_page: u32 = 0xFFFFFFFF;
@@ -154,9 +158,12 @@ let DC_SIZE = 16384;
 
 // ---- Faults ----
 
+var fault_err: u32 = 0;
+var phys_mask: u32 = 0xFFFFF;
 var fault_vec: u8 = 0;
 var fault_has_err = false;
-var fault_err: u32 = 0;
+var tr_32 = true;            // the task segment is a 32-bit one
+var code_ok = false;         // the whole page behind code_phys is in RAM, where the decode cache can read it
 
 // Abandons the instruction being executed with fault vec. step() then restores the state the
 // instruction started from and delivers the fault.
@@ -176,7 +183,6 @@ fn raise_np(err: u32) { raise(11, true, err); }          // segment not present
 // The 16-bit machine (boot sectors, floppies, ROMs) has 1 MB and its addresses wrap there, as on
 // a PC with the A20 line off. The 32-bit machine (a Linux kernel) has all of RAM_SIZE. Above the
 // end of memory nothing answers: reads give FFh and writes are dropped.
-var phys_mask: u32 = 0xFFFFF;
 
 // The CPU's generation follows the machine too. False: a 386 with no CPUID, for the 16-bit
 // machine. True: an i686, for the 32-bit one: the instructions the 486, Pentium and P6 added,
