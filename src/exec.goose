@@ -1137,8 +1137,21 @@ fn classify(slot: i64, raw: u64) {
 
 // The 32-bit operand of a short instruction: a register, or memory at the address the entry
 // describes. short_ea must have run first for the memory case.
+// The effective address of a short instruction's memory operand. As ea_from, for the one case
+// there is here: 32-bit addressing and no segment override, so nothing of the decode state is
+// consulted.
+inline fn ea_short(mm: u32, disp: u32) {
+    var off = disp;
+    let base = mm >> 14 & 15;
+    if base != 0 { off += cpu.regs[base - 1]; }
+    let index = mm >> 18 & 15;
+    if index != 0 { off += cpu.regs[index - 1] << (mm >> 22 & 3); }
+    ea_off = off;
+    ea_seg = if mm & M_SS != 0 { SS } else { DS };
+}
+
 inline fn short_ea(mm: u32, slot: i64) {
-    if mm & 0x0C != 0x0C { ea_from(mm, dc[slot].disp); }
+    if mm & 0x0C != 0x0C { ea_short(mm, dc[slot].disp); }
 }
 
 inline fn short_read(mm: u32) -> u32 {
@@ -1161,22 +1174,23 @@ inline fn short_write8(mm: u32, v: u32) {
     else { seg_write(ea_seg, ea_off, 8, v); }
 }
 
-inline fn run_short(kind: u8, slot: i64) {
+// ip0 is the instruction pointer at the instruction's first byte.
+inline fn run_short(kind: u8, slot: i64, ip0: u32) {
     let mm = dc[slot].m;
     let imm = dc[slot].imm;
     let reg = mm >> 4 & 7;
-    cpu.ip = dc_ip0 + (mm >> 26 & 15);
+    cpu.ip = ip0 + (mm >> 26 & 15);
     match kind {
         1 => { short_ea(mm, slot); cpu.regs[reg] = short_read(mm); },
         2 => { short_ea(mm, slot); short_write(mm, cpu.regs[reg]); },
         3 => {
-            let aop = ins.op >> 3;
+            let aop = dc[slot].pre.op >> 3;
             short_ea(mm, slot);
             let r = alu(aop, short_read(mm), cpu.regs[reg], 32);
             if aop != 7 { short_write(mm, r); }
         },
         4 => {
-            let aop = ins.op >> 3;
+            let aop = dc[slot].pre.op >> 3;
             short_ea(mm, slot);
             let r = alu(aop, cpu.regs[reg], short_read(mm), 32);
             if aop != 7 { cpu.regs[reg] = r; }
@@ -1187,7 +1201,7 @@ inline fn run_short(kind: u8, slot: i64) {
             let r = alu(aop, short_read(mm), imm, 32);
             if aop != 7 { short_write(mm, r); }
         },
-        6 => { ea_from(mm, dc[slot].disp); cpu.regs[reg] = ea_off; },
+        6 => { ea_short(mm, dc[slot].disp); cpu.regs[reg] = ea_off; },
         7 => { short_ea(mm, slot); alu(4, short_read(mm), cpu.regs[reg], 32); },
         8 => { short_ea(mm, slot); short_write(mm, shift(reg as! u8, short_read(mm), imm as! u8, 32)); },
         9 => { short_ea(mm, slot); short_write(mm, shift(reg as! u8, short_read(mm), r8(1), 32)); },
@@ -1196,30 +1210,30 @@ inline fn run_short(kind: u8, slot: i64) {
         12 => { push_w(cpu.ip, 32); cpu.ip += imm; },
         13 => { cpu.ip = pop_w(32); },
         14 => {},
-        15 => { push_w(cpu.regs[ins.op & 7], 32); },
-        16 => { let v = pop_w(32); cpu.regs[ins.op & 7] = v; },
-        17 => { cpu.regs[ins.op & 7] = inc(cpu.regs[ins.op & 7], 32); },
-        18 => { cpu.regs[ins.op & 7] = dec(cpu.regs[ins.op & 7], 32); },
-        19 => { cpu.regs[ins.op & 7] = imm; },
+        15 => { push_w(cpu.regs[dc[slot].pre.op & 7], 32); },
+        16 => { let v = pop_w(32); cpu.regs[dc[slot].pre.op & 7] = v; },
+        17 => { cpu.regs[dc[slot].pre.op & 7] = inc(cpu.regs[dc[slot].pre.op & 7], 32); },
+        18 => { cpu.regs[dc[slot].pre.op & 7] = dec(cpu.regs[dc[slot].pre.op & 7], 32); },
+        19 => { cpu.regs[dc[slot].pre.op & 7] = imm; },
         20 => {
             if mm & 0x0C == 0x0C { cpu.regs[reg] = r8((mm >> 7 & 7) as! u8); }
-            else { ea_from(mm, dc[slot].disp); cpu.regs[reg] = seg_read(ea_seg, ea_off, 8); }
+            else { ea_short(mm, dc[slot].disp); cpu.regs[reg] = seg_read(ea_seg, ea_off, 8); }
         },
         21 => {
             if mm & 0x0C == 0x0C { cpu.regs[reg] = cpu.regs[mm >> 7 & 7] & 0xFFFF; }
-            else { ea_from(mm, dc[slot].disp); cpu.regs[reg] = seg_read(ea_seg, ea_off, 16); }
+            else { ea_short(mm, dc[slot].disp); cpu.regs[reg] = seg_read(ea_seg, ea_off, 16); }
         },
         22 => { short_ea(mm, slot); set_r8(reg as! u8, short_read8(mm) as! u8); },
         23 => { short_ea(mm, slot); let v: u32 = r8(reg as! u8); short_write8(mm, v); },
         24 => {
-            let aop = ins.op >> 3;
+            let aop = dc[slot].pre.op >> 3;
             short_ea(mm, slot);
             let b: u32 = r8(reg as! u8);
             let r = alu(aop, short_read8(mm), b, 8);
             if aop != 7 { short_write8(mm, r); }
         },
         25 => {
-            let aop = ins.op >> 3;
+            let aop = dc[slot].pre.op >> 3;
             short_ea(mm, slot);
             let a: u32 = r8(reg as! u8);
             let r = alu(aop, a, short_read8(mm), 8);
@@ -1338,23 +1352,32 @@ var light_save = 0;
 
 fn exec_short() -> bool {
     var ran = false;
+    // What does not change during a run is worked out once. No short executor loads the code
+    // segment, so its base and limit stand; only the first instruction can have interrupts held
+    // off for it (the instruction before it set that, and it was not part of this run); and the
+    // run may go on for as many instructions as there is virtual time before the next event.
+    let base = cpu.base[CS];
+    let lim = cpu.limit[CS];
+    if lim < 15 { return false; }
+    let ip_max = lim - 15;
+    var held = shadow;
+    var left = chain_until - vtime;
     loop {
-        let a = cpu.base[CS] + cpu.ip;
-        let lim = cpu.limit[CS];
-        if !(a >> 12 == code_page && code_ok && a & 0xFFF <= 0xFF0 && lim >= 15 && cpu.ip <= lim - 15) { break; }
+        let ip0 = cpu.ip;
+        let a = base + ip0;
+        if a >> 12 != code_page || !code_ok || a & 0xFFF > 0xFF0 || ip0 > ip_max { break; }
         let slot: i64 = a & (DC_HALF - 1) | DC_HALF;
         let kind = dc[slot].pre.kind;
         if dc[slot].tag != a || kind == 0 || kind == K_NONE { break; }
         let raw = code64(code_phys | a & 0xFFF);
         if (raw ^ dc[slot].bytes) & dc[slot].mask != 0 { break; }
-        // If interrupts were being held off for this one instruction, an interrupt may be
-        // due straight after it: no run then.
-        let held = shadow;
         shadow = false;
-        dc_ip0 = cpu.ip;
-        ins = dc[slot].pre;
-        run_short(kind, slot);
-        if held || vtime + 1 >= chain_until { light_save = 0; return true; }       // no short executor changes CS
+        run_short(kind, slot, ip0);
+        // If interrupts were being held off for that instruction, one may be due straight
+        // after it: no run then.
+        if held || left <= 1 { light_save = 0; return true; }
+        held = false;
+        left -= 1;
         vtime += 1;
         saved.ip = cpu.ip;
         saved.flags = cpu.flags;
@@ -1423,7 +1446,7 @@ fn exec_general() -> bool {
             // An instruction with a short executor is run here and now, and that is all of it.
             let kind = ins.kind;
             if kind < K_NONE {
-                if kind != 0 { run_short(kind, slot); return true; }
+                if kind != 0 { run_short(kind, slot, dc_ip0); return true; }
                 classify(slot, raw);
             }
             cpu.ip += ins.plen;
