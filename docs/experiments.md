@@ -1722,3 +1722,91 @@ worth a card of its own.
 Also in: the TLB only holds pages that lie in RAM below the wrap point, so a hit needs no
 further address test; and the short path takes any upward data segment within its limit, not
 only a flat one, so that 16-bit code uses it too.
+
+## E022: The arithmetic, shift and conditional-jump executors know which operation they are (2026-11-14)
+
+- **Hypothesis**: The roadmap said "compute the flags lazily: an arithmetic instruction costs 54
+  more than a MOV". Measured before designing anything (host instructions per guest instruction,
+  `probe/bench32.asm`): `mov eax, edx` 82; `test eax, edx` 101; `inc eax` 107; `add`, `sub`,
+  `xor`, `and`, `cmp eax, edx` 132 to 140; `add eax, 5` 123; `shl eax, 3` 175. TEST and XOR set
+  the same flags from the same kind of result, and XOR costs 33 more. The difference is not the
+  flags: TEST's executor is written for one operation, while the arithmetic executors take the
+  operation as a number from the opcode and sort it out when they run, in `alu`'s `match` and
+  the conditions inside it. The same holds for the shifts (one general function for eight kinds
+  of shift and rotate) and for the conditional jumps (sixteen conditions told apart at run
+  time). So the flags themselves cost about 20, and what can be removed cheaply is the sorting
+  out: an executor per operation. That should take 30 off each arithmetic instruction (17% of a
+  boot), more off each shift (6%), and some off each conditional jump (11%): below 280 billion
+  host instructions on the boot (it is 299 billion).
+- **What changed since last time**: E021's estimate came from a difference between two
+  numbers and was wrong about where the cost was. This one was taken apart first, by measuring
+  instructions that differ in one respect only. Lazy flags, the roadmap's item, are not done:
+  they would save about 15 of the remaining 20 on each arithmetic instruction, at the price of
+  every reader of the flags in the program having to ask for them first.
+- **Next move for each result**:
+  - Below 280 billion → keep; measure again what the flags cost and decide about lazy flags
+    from that
+  - Above 280 billion → the sorting out is not where the 33 are; compare the disassembly of the
+    TEST and XOR executors
+  - A test fails or the guest instruction count changes → a flag differs for some operand
+    (carry or overflow at the edges, a shift count of 31, the parity of a result); the trace
+    tests name the instruction
+- **Cut-off**: The same day. `tools/difftest.sh` at 51 of 51, test386 byte for byte, the boot at
+  1,651,240,001 instructions; `u_short` extended so that each new executor runs with operands
+  that set and clear every flag.
+
+### Result
+
+2026-11-14. **Held in kind, short in amount: 288.8 billion host instructions on the boot, where
+the card said below 280 (it was 299.2).** Per instruction it did what was expected:
+
+| Instruction | Before | After |
+|---|---:|---:|
+| `mov eax, edx` (for reference) | 82 | 82 |
+| `test eax, edx` | 101 | 98 |
+| `xor eax, edx` | 134 | 105 |
+| `cmp eax, edx` | 133 | 108 |
+| `add eax, edx` | 132 | 116 |
+| `add eax, 5` | 123 | 112 |
+| `inc eax` | 107 | 103 |
+| `shl eax, 3` | 175 | 114 |
+| `dec ecx` and `jnz`, averaged | 111 | 105 |
+
+| Benchmark | Before | After |
+|---|---:|---:|
+| Linux boot to the shell prompt | 299.2 billion host instructions, 56.8 billion cycles | 288.8 billion, 55.4 to 56.3 billion |
+| test386 | 22.7 billion | 22.5 billion |
+| bench.bin (real mode) | 97.3 billion, 14.2 billion cycles | 96.7 billion, 14.0 billion |
+
+The machine was busy during these runs, so times are left out; cycles vary by a couple of
+percent between runs and the instruction counts do not. The boot still takes 1,651,240,001
+guest instructions; `tools/difftest.sh` is at 53 of 53; test386 is byte for byte the reference.
+
+What went in: an executor per operation for the arithmetic grid, `83` and `81` (all but ADC and
+SBB, which read the carry and stay general); one each for SHL, SHR and SAR by a count from 1 to
+31; conditional jumps as "any of these flags set", "SF differs from OF", and "that, or zero",
+with the sense kept in the entry; and the parity flag from a 256-entry table instead of five
+shifts and exclusive-ors.
+
+Why 10 billion and not 19: the estimate took 30 off every arithmetic instruction. XOR and CMP
+lost 25 to 29, ADD lost 16, the immediate forms 11. The arithmetic flags proper (carry, overflow,
+auxiliary carry) cost more than the card allowed for: ADD is 116 where XOR is 105.
+
+**The new tests were wrong twice before they were right.** A test for the new executors
+(`u_short2`) matched rustx86 at once. So did two builds with a deliberate error in them: a shift
+by 1 with the wrong OF, and JLE without its zero test.
+
+- The shifts by 1 were never run by the new executor: the assembler encodes `shl eax, 1` as `D1`,
+  and the executor is for `C1`. They are written as bytes now
+- The condition codes were tested with an INC as the instruction to jump over or not, and INC
+  sets the flags. From the second condition on, the flags were INC's. The instruction is an LEA
+  now, and the conditions have a test of their own (`u_cond`: sixteen conditions from five flag
+  states, four passes, 535 lines)
+
+After that both wrong builds fail, each in the third pass, where the executors start. Without
+the deliberate errors there would have been two tests that passed and checked nothing; the same
+thing happened in E020. A test of a fast path is not finished until a wrong fast path fails it.
+
+What the flags cost now: a logical operation 16 to 23 over a MOV, an addition 34. Lazy flags
+would take most of that for the instructions whose flags are never read, at the price named in
+the card. Not decided.
