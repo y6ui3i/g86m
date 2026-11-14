@@ -193,19 +193,24 @@ fn run_until(limit: i64) -> i64 {
                 // Idle: nothing can happen until the timer fires, so jump there, but not past
                 // the limit, so that a caller pacing against real time keeps its count.
                 guard timer_on else { return RUN_STOPPED; }
-                let skip = if timer_left < limit - vtime { timer_left } else { limit - vtime };
-                vtime += skip;
-                timer_left -= skip;
-                if timer_left <= 0 { timer_fire(); }
+                vtime = if timer_at < limit { timer_at } else { limit };
+                if vtime >= timer_at { timer_fire(); }
                 continue;
             }
         }
-        step();
-        vtime++;
-        if timer_on {
-            timer_left -= 1;
-            if timer_left <= 0 { timer_fire(); }
+        // The next moment at which something other than an instruction has to happen: the limit,
+        // the timer reaching zero, a look at the script; with a trace, after every instruction.
+        var stop_at = limit;
+        if timer_on && timer_at < stop_at { stop_at = timer_at; }
+        if scripted && next_poll < stop_at { stop_at = next_poll; }
+        if trace || trace_after >= 0 { stop_at = vtime + 1; }
+        replan = false;
+        loop {
+            step();
+            vtime++;
+            if vtime >= stop_at || cpu.halted || replan { break; }
         }
+        if timer_on && vtime >= timer_at { timer_fire(); }
         if trace { trace_line(); }
         else if trace_after >= 0 && vtime >= trace_after { trace = true; }
         if scripted && vtime >= next_poll {

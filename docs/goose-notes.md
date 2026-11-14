@@ -63,10 +63,10 @@ Related: files may import each other in a cycle, but globals are initialized imp
 `var saved: Cpu = cpu;` in the file that the file declaring `cpu` imports was rejected ("may be used
 before it is assigned"). The global went into the file that declares `cpu`.
 
-## 4. What generated code costs: three things that were not obvious
+## 4. What generated code costs: things that were not obvious
 
-All three were found by counting host instructions for one guest instruction (`/usr/bin/time -l`
-for the total, a debugger stepping one instruction for the detail). See E010 in
+They were found by counting host instructions for one guest instruction (`/usr/bin/time -l`
+for the total, a debugger stepping one instruction for the detail). See E010 and E015 in
 [experiments.md](experiments.md).
 
 - **An integer `match` is a chain of comparisons.** There is no `switch` in the generated C. The C
@@ -78,6 +78,15 @@ for the total, a debugger stepping one instruction for the detail). See E010 in
   away, and far offsets cost extra instructions on every access. Names are visible program-wide
   without an import, so a file of large arrays can be imported once, last, by the root file
   (`src/big.goose`)
+- **Mark the small functions of a hot path `inline fn`.** The helpers of g86m's instruction path
+  were all calls in the generated code: Goose had not inlined them, and the C compiler stops
+  inlining into a function once it is large, which an interpreter's main function is. Each call saves and restores registers, and each call to something that can fault
+  is followed by a test of the fault flag. Marking the helpers of the instruction path `inline fn`
+  cut a quarter of the host instructions (E015). It costs build time: inlining one large function
+  that is called from many places tripled it
+- **Globals and struct fields are packed, with no alignment.** A 32-bit field can sit at an odd
+  address. On arm64 that costs one extra instruction per access, which turned out not to matter
+  (1.5%, E015)
 - **`/` is checked for a zero divisor**, by a call, even when the divisor is the literal 8. Use a
   shift on hot paths. Mind the precedence when replacing: `a + w >> 3` is not `a + (w >> 3)`
 
