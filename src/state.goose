@@ -369,24 +369,44 @@ inline fn seg_check(s: i64, off: u32, w: u8, write: bool) -> u32 {
 
 // The physical page behind linear address a, for a read or for a write at the current privilege
 // level, through the TLB.
+// A TLB entry is made only for a page that lies in RAM, below the point where physical addresses
+// wrap. A hit therefore says more than "this is the translation": it says the whole page can be
+// read or written directly, which is what the short path of seg_read and seg_write relies on.
+// A page outside RAM is translated every time.
+fn tlb_fill_read(a: u32) -> u32 {
+    let page = a >> 12;
+    let i = page & 0xFF | (if cpu.cpl == 3 { 0x100 } else { 0 });
+    let phys = translate(a, false, cpu.cpl == 3) & 0xFFFFF000;
+    if phys < RAM_SIZE - 4096 && phys <= phys_mask - 0xFFF {
+        tlb_rphys[i] = phys;
+        tlb_rtag[i] = page;
+    }
+    return phys;
+}
+
+fn tlb_fill_write(a: u32) -> u32 {
+    let page = a >> 12;
+    let i = page & 0xFF | (if cpu.cpl == 3 { 0x100 } else { 0 });
+    let phys = translate(a, true, cpu.cpl == 3) & 0xFFFFF000;
+    if phys < RAM_SIZE - 4096 && phys <= phys_mask - 0xFFF {
+        tlb_wphys[i] = phys;
+        tlb_wtag[i] = page;
+    }
+    return phys;
+}
+
 inline fn page_read(a: u32) -> u32 {
     let page = a >> 12;
     let i = page & 0xFF | (if cpu.cpl == 3 { 0x100 } else { 0 });
-    if tlb_rtag[i] != page {
-        tlb_rphys[i] = translate(a, false, cpu.cpl == 3) & 0xFFFFF000;
-        tlb_rtag[i] = page;
-    }
-    return tlb_rphys[i];
+    if tlb_rtag[i] == page { return tlb_rphys[i]; }
+    return tlb_fill_read(a);
 }
 
 inline fn page_write(a: u32) -> u32 {
     let page = a >> 12;
     let i = page & 0xFF | (if cpu.cpl == 3 { 0x100 } else { 0 });
-    if tlb_wtag[i] != page {
-        tlb_wphys[i] = translate(a, true, cpu.cpl == 3) & 0xFFFFF000;
-        tlb_wtag[i] = page;
-    }
-    return tlb_wphys[i];
+    if tlb_wtag[i] == page { return tlb_wphys[i]; }
+    return tlb_fill_write(a);
 }
 
 // Data access at the current privilege level, through the cached translations when the access
@@ -415,8 +435,68 @@ inline fn data_write(a: u32, w: u8, v: u32) {
     else { set_mem32(p, v); }
 }
 
-inline fn seg_read(s: i64, off: u32, w: u8) -> u32 { return data_read(seg_check(s, off, w, false), w); }
-inline fn seg_write(s: i64, off: u32, w: u8, v: u32) { data_write(seg_check(s, off, w, true), w, v); }
+fn seg_read_general(s: i64, off: u32, w: u8) -> u32 { return data_read(seg_check(s, off, w, false), w); }
+fn seg_write_general(s: i64, off: u32, w: u8, v: u32) { data_write(seg_check(s, off, w, true), w, v); }
+
+// An access through a segment register. The short path is for what nearly every access is: a
+// valid, writable data segment that grows upward, an access that ends at or below its limit (a
+// 64 KB real-mode segment qualifies as well as a flat 4 GB one) and lies inside one page,
+// and a page with a TLB entry for this kind of access at this privilege level, which also means
+// the page is in RAM. Then the bytes are simply loaded or stored. Anything else goes the general
+// way, which is also what makes the TLB entry the next access will find.
+inline fn seg_read(s: i64, off: u32, w: u8) -> u32 {
+    let nb: u32 = ((w as u32) >> 3);
+    let a = cpu.base[s] + off;
+    let lim = cpu.limit[s];
+    if (cpu.attr[s] & (A_VALID | A_CODE | A_DOWN_CONF | A_RW)) == (A_VALID | A_RW)
+        && lim >= nb - 1 && off <= lim - (nb - 1) && (a & 0xFFF) + nb <= 0x1000 {
+        let page = a >> 12;
+        let i = page & 0xFF | (if cpu.cpl == 3 { 0x100 } else { 0 });
+        if tlb_rtag[i] == page {
+            let q: i64 = tlb_rphys[i] | a & 0xFFF;
+            if q < RAM_SIZE - 3 {
+                if w == 32 {
+                    let b0: u32 = ram[q]; let b1: u32 = ram[q + 1]; let b2: u32 = ram[q + 2]; let b3: u32 = ram[q + 3];
+                    return b0 | b1 << 8 | b2 << 16 | b3 << 24;
+                }
+                if w == 16 {
+                    let b0: u32 = ram[q]; let b1: u32 = ram[q + 1];
+                    return b0 | b1 << 8;
+                }
+                return ram[q];
+            }
+        }
+    }
+    return seg_read_general(s, off, w);
+}
+
+inline fn seg_write(s: i64, off: u32, w: u8, v: u32) {
+    let nb: u32 = ((w as u32) >> 3);
+    let a = cpu.base[s] + off;
+    let lim = cpu.limit[s];
+    if (cpu.attr[s] & (A_VALID | A_CODE | A_DOWN_CONF | A_RW)) == (A_VALID | A_RW)
+        && lim >= nb - 1 && off <= lim - (nb - 1) && (a & 0xFFF) + nb <= 0x1000 {
+        let page = a >> 12;
+        let i = page & 0xFF | (if cpu.cpl == 3 { 0x100 } else { 0 });
+        if tlb_wtag[i] == page {
+            let q: i64 = tlb_wphys[i] | a & 0xFFF;
+            if q < RAM_SIZE - 3 {
+                // Each width stores all its bytes in one block, so that the C compiler merges
+                // them into a single store of that width. A 16-bit value stored as two separate
+                // bytes and read back as 16 bits (PUSH then POP) stalls the host CPU.
+                if w == 32 {
+                    ram[q] = v as! u8; ram[q + 1] = (v >> 8) as! u8; ram[q + 2] = (v >> 16) as! u8; ram[q + 3] = (v >> 24) as! u8;
+                } else if w == 16 {
+                    ram[q] = v as! u8; ram[q + 1] = (v >> 8) as! u8;
+                } else {
+                    ram[q] = v as! u8;
+                }
+                return;
+            }
+        }
+    }
+    seg_write_general(s, off, w, v);
+}
 
 // ---- Registers ----
 

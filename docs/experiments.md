@@ -1635,3 +1635,90 @@ more); test386 is byte for byte the reference.
 The estimate of 10 billion was 78 million elements at about 130 host instructions saved each.
 Either fewer of them qualify (the bulk path wants an upward copy with 32-bit addressing through
 flat segments) or an element was costing less than 150; which was not measured.
+
+## E021: A short path for memory accesses (2026-11-14)
+
+- **Hypothesis**: An instruction that touches memory pays far more for the access than for
+  anything else. Measured on main (`probe/bench32.asm`, host instructions per guest instruction,
+  inside a run of short instructions): `nop` 74, `mov eax, edx` 81, `mov eax, [ebx+8]` 159,
+  `mov [ebx+8], eax` 161, `add [ebx+8], eax` 269. One read costs 78 and one write 80, more than
+  the whole of a register instruction. An access goes through the segment check, the one-entry
+  page cache, the TLB behind it, a mask, two range tests and the load, each written to be right
+  in every case. For the common case (a flat segment, an access inside one page, a page the TLB
+  knows and that lies in RAM) one test of each of those and a load should do: about 25. About
+  four instructions in ten of a Linux boot touch memory, so the boot should lose more than 20
+  billion of its 307 billion host instructions.
+- **What changed since last time**: E015 built the TLB behind the one-entry caches and E017 gave
+  the segment check a short case; the access itself was never looked at as a whole. Now the
+  common case is one inline path in `seg_read` and `seg_write`, in front of the existing code,
+  which stays as it is for everything else. A TLB entry is only made for a page that lies in RAM
+  below the point where physical addresses wrap, so a hit needs no further test of the address.
+- **Next move for each result**:
+  - The count falls → keep; measure what a read costs now, then go on to the flags (the next
+    largest: `add eax, edx` costs 54 more than `mov eax, edx`)
+  - It falls by less than half the estimate → the 78 are not in the access; list the host
+    instructions of one `mov eax, [ebx+8]` from the disassembly before changing more
+  - A test fails or the guest instruction count changes → a case the short path takes that it
+    should not (an access across a page end, a segment that only looks flat, a stale entry after
+    a change of privilege); narrow the condition
+- **Cut-off**: The same day. `tools/difftest.sh` at 51 of 51, test386 byte for byte, the boot at
+  1,651,240,001 instructions.
+
+### Result
+
+2026-11-14. **The hypothesis was wrong about where a memory access costs. The boot is 8% faster
+all the same, mostly from something else found on the way, and one byte nearly cost a fifth.**
+
+| | Before (main) | After |
+|---|---:|---:|
+| Linux boot to the shell prompt | 19.6 to 20.3 s, 307.1 billion host instructions, 60.4 billion cycles | 18.1 to 18.2 s, 299.2 billion, 56.8 billion |
+| test386 | 1204 to 1209 ms | 1133 to 1250 ms |
+| bench.bin (real mode) | 4522 to 4551 ms | 4516 to 4530 ms |
+
+Times are from alternating runs on a machine that was not idle; the counts are what to go by.
+The boot still takes 1,651,240,001 guest instructions; `tools/difftest.sh` is at 51 of 51;
+test386 is byte for byte the reference.
+
+**The short path for an access did not shorten the access.** Host instructions per guest
+instruction, before and after: `mov eax, [ebx+8]` 159 and 162; `mov [ebx+8], eax` 161 and 149;
+`add [ebx+8], eax` 269 and 253. A read costs what it did. The disassembly of the short executor
+for `mov r32, [mem]` says why the estimate was wrong: the 78 host instructions that a read adds
+are about 20 to build the address from the decoded operand (testing for a base, for an index,
+unpacking each), a handful to settle the segment, and about 30 for the access, which was
+already most of the way to its short form after E015 and E017. There was little left in the
+part this card went after.
+
+**What did help: not saving the whole CPU for each instruction of a run.** A run of short
+instructions copied all 128 bytes of the CPU at the start of each, in case it faulted. A short
+executor changes only the instruction pointer and the flags before the last point at which it
+can fault, so those two are saved instead and `step` restores just them. 300.7 to 291.6 billion
+on the boot when it went in. Page faults inside runs happen throughout a Linux boot, and the
+guest instruction count is unchanged, which is the evidence that the restore is right.
+
+**One byte.** The flag that says "only two fields were saved" was first a `bool`. With it the
+boot was faster and the 16-bit benchmark took a fifth longer, on fewer host instructions:
+
+| The flag | bench.bin | Linux boot |
+|---|---:|---:|
+| not there (main) | 97.2 billion instructions, 14.3 billion cycles | 307.1, 60.4 |
+| a `bool` | 95.0, 17.2 | 291.5, 56.0 |
+| an `i64` | 97.3, 14.2 | 299.2, 56.8 |
+
+Goose packs globals. A one-byte global moves every global declared after it, in that file and
+in every file imported later, by one byte. Reverting each changed file in turn showed the
+slowdown came with `exec.goose`, not with the memory path; padding of 0 to 7 bytes after the
+flag showed the pattern exactly: every even size gives 14.2 billion cycles on the benchmark and
+about 299 billion instructions on the boot, every odd size about 17.2 billion cycles and 287 to
+295 billion instructions. So an odd shift makes some later globals cheaper to address (fewer
+instructions) and makes something stall (more cycles on 16-bit code). The flag is an `i64` now,
+which keeps everything behind it where it was.
+
+Not established: which global stalls. It is not the RAM array's position (shifting it by nine
+different amounts changes nothing) and not the virtual-time counter (realigning only that
+leaves the stall). And not collected: the 4% of instructions that an odd shift saves on the
+boot. Both say the same thing: the layout of the globals in the files after `exec.goose` is
+worth a card of its own.
+
+Also in: the TLB only holds pages that lie in RAM below the wrap point, so a hit needs no
+further address test; and the short path takes any upward data segment within its limit, not
+only a flat one, so that 16-bit code uses it too.
