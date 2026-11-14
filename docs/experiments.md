@@ -1810,3 +1810,75 @@ thing happened in E020. A test of a fast path is not finished until a wrong fast
 What the flags cost now: a logical operation 16 to 23 over a MOV, an addition 34. Lazy flags
 would take most of that for the instructions whose flags are never read, at the price named in
 the card. Not decided.
+
+## E023: What a run repeats for every instruction and need not (2026-11-14)
+
+- **Hypothesis**: Inside a run of short instructions a NOP costs 74 host instructions, and none
+  of them is the NOP. Read from the disassembly of `exec_short` (E021): about 12 to test that the
+  instruction can be looked up (the code page, the segment limit), 12 to find the entry and its
+  kind, 12 to compare the instruction's bytes, 11 to take the entry apart (copy the decode state,
+  note the instruction pointer, the interrupt shadow), 9 to dispatch, 14 after the executor (the
+  time, the two saved fields). Several of these do not change from one instruction of a run to
+  the next and are redone each time: the code segment's base and limit, the interrupt shadow
+  (only the first instruction of a run can have one), the copy of the decode state (a short
+  instruction has no prefix, so nothing in it is needed but the opcode, and only by some kinds),
+  how much virtual time is left before the run must stop. Taking those out of the loop should
+  remove 10 to 15 of the 74: more than 15 billion of the boot's 289 billion host instructions.
+- **What changed since last time**: The roadmap called this "execute in blocks": remember a run
+  of instructions as a unit and validate it once. That is a new structure with its own
+  invalidation. This is the part of it that needs no new structure: the loop stays one
+  instruction at a time and each instruction's bytes are still compared; only the work that is
+  provably the same for every instruction of a run moves in front of the loop.
+- **Next move for each result**:
+  - The count falls by the estimate → keep; what is then left per instruction is the lookup,
+    the byte comparison and the dispatch, which is what a block structure would remove; decide
+    on that with the new numbers
+  - It falls by much less → the C compiler was already hoisting these; nothing to do here, go
+    to the block structure or stop
+  - The guest instruction count changes → something taken out of the loop does change within a
+    run after all (the code segment cannot; the shadow and the time are the ones to check)
+- **Cut-off**: The same day. `tools/difftest.sh` at 53 of 53, test386 byte for byte, the boot at
+  1,651,240,001 instructions.
+
+### Result
+
+2026-11-14. **Held: 277.1 billion host instructions on the boot, from 288.8; the estimate was
+"more than 15 billion", and it is 11.7.**
+
+| Instruction | Before | After |
+|---|---:|---:|
+| `nop` | 74 | 69 |
+| `mov eax, edx` | 82 | 78 |
+| `mov eax, [ebx+8]` | 162 | 141 |
+| `mov [ebx+8], eax` | 149 | 137 |
+| `add eax, edx` | 116 | 111 |
+| `lea eax, [ebx+edx*4+8]` | 108 | 101 |
+| `dec ecx` and `jnz`, averaged | 105 | 98 |
+
+| Benchmark | Before | After |
+|---|---:|---:|
+| Linux boot to the shell prompt | 288.8 billion host instructions, about 55.4 to 56.3 billion cycles | 277.1 billion, 55.0 billion |
+| test386 | 22.5 billion | 22.4 billion |
+| bench.bin (real mode) | 96.7 billion | 96.8 billion |
+
+The boot still takes 1,651,240,001 guest instructions; `tools/difftest.sh` is at 53 of 53;
+test386 is byte for byte the reference. The machine was busy (load about 4), so no times.
+
+What moved out of the loop: the code segment's base and limit; the interrupt shadow, read once;
+the virtual time left, as a count kept in the function; and the copy of the decode state, which
+a short executor no longer needs at all. It took the opcode from that copy, and now takes it
+from the entry in the few kinds that want it. The copy had one more reader, which was the one
+to be careful about: the effective address asked the decode state for a segment override. A
+short instruction has no prefix, so it has none; the short executors now build their address
+with a function of their own that does not ask. That is also why a memory operand got 12 to 21
+cheaper, more than the fixed cost did.
+
+The instruction count fell by 4% and the cycle count by about 1%: this was work the host did in
+parallel with what the instruction was waiting for anyway.
+
+What is left of the 69 for a NOP: finding the entry (about 12), comparing its bytes (12), the
+page and limit tests (10), taking the entry apart (7), the dispatch (8), and the 12 after the
+executor. The byte comparison is the one a different design would remove: remember that a page
+of code has not been written to since its entries were checked, instead of checking each entry
+each time. That needs every store to memory to tell the cache about it, and a missed one would
+run stale code; it is the next card or none.
