@@ -1246,16 +1246,30 @@ var chain_until = 0;
 // Runs short executors for as long as it can. True when it ran at least one instruction and the
 // last one is still to be counted by the caller; false when the instruction at hand is not one
 // of them, and nothing has been done about it.
+// Within a run, only the instruction pointer and the flags are noted at the start of each
+// instruction, not the whole CPU: a short executor changes nothing else before the last point
+// at which it can fault (it reads before it writes a register, and writes memory before it
+// moves the stack pointer). light_save tells step, which undoes a faulting instruction, that
+// `saved` holds just those two.
+//
+// It is a 64-bit number, 0 or 1, and not a bool, on purpose. Goose packs globals with no
+// padding, so one more byte here moves every global declared after it, in this file and in the
+// files imported later, by one byte. Among those is the virtual time, a 64-bit counter written
+// after every instruction; moved off its alignment it costs the host a fifth more cycles on
+// 16-bit code (E021). Eight bytes leave everything behind where it was.
+var light_save = 0;
+
 fn exec_short() -> bool {
+    var ran = false;
     loop {
         let a = cpu.base[CS] + cpu.ip;
         let lim = cpu.limit[CS];
-        if !(a >> 12 == code_page && code_ok && a & 0xFFF <= 0xFF0 && lim >= 15 && cpu.ip <= lim - 15) { return false; }
+        if !(a >> 12 == code_page && code_ok && a & 0xFFF <= 0xFF0 && lim >= 15 && cpu.ip <= lim - 15) { break; }
         let slot: i64 = a & (DC_HALF - 1) | DC_HALF;
         let kind = dc[slot].pre.kind;
-        if dc[slot].tag != a || kind == 0 || kind == K_NONE { return false; }
+        if dc[slot].tag != a || kind == 0 || kind == K_NONE { break; }
         let raw = code64(code_phys | a & 0xFFF);
-        if (raw ^ dc[slot].bytes) & dc[slot].mask != 0 { return false; }
+        if (raw ^ dc[slot].bytes) & dc[slot].mask != 0 { break; }
         // If interrupts were being held off for this one instruction, an interrupt may be
         // due straight after it: no run then.
         let held = shadow;
@@ -1263,10 +1277,16 @@ fn exec_short() -> bool {
         dc_ip0 = cpu.ip;
         ins = dc[slot].pre;
         run_short(kind, slot);
-        if held || vtime + 1 >= chain_until { return true; }       // no short executor changes CS
+        if held || vtime + 1 >= chain_until { light_save = 0; return true; }       // no short executor changes CS
         vtime += 1;
-        saved = cpu;
+        saved.ip = cpu.ip;
+        saved.flags = cpu.flags;
+        light_save = 1;
+        ran = true;
     }
+    // The instruction at hand is for the general path, which wants the whole CPU saved.
+    if ran { saved = cpu; light_save = 0; }
+    return false;
 }
 
 // This function only chooses, so that it needs no registers of its own and costs next to nothing
@@ -1743,7 +1763,16 @@ fn step() {
     var has_err = fault_has_err;
     var err = fault_err;
     for attempt in 3 {
-        cpu = saved;
+        if light_save != 0 {
+            // The fault was in a run of short instructions: put back what they change, and
+            // make `saved` whole again.
+            cpu.ip = saved.ip;
+            cpu.flags = saved.flags;
+            saved = cpu;
+            light_save = 0;
+        } else {
+            cpu = saved;
+        }
         forget_last();                   // the privilege level may have gone back with the rest
         if log_faults { note_fault(vec, has_err, err); }
         if attempt == 2 { stop("triple fault; the last vector was", vec); return; }

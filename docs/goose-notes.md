@@ -93,6 +93,12 @@ for the total, a debugger stepping one instruction for the detail). See E010 and
   index it is one load. And a range test passed in from the caller as a boolean does not remove
   the bounds checks; `if p < SIZE - 8 { ... }` around the indexing does. `goose build
   --bce-lines` says which checks are left (E017)
+- **Adding a one-byte global can change the speed of code that never touches it.** Globals are
+  packed, so a `bool` moves every global declared after it, in that file and in the files
+  imported later, by one byte. In g86m one such `bool` made 16-bit code take a fifth more host
+  cycles and 32-bit code 4% fewer host instructions, both through globals in other files.
+  Declaring it as an `i64` left the rest where it was (E021). When a change slows something it
+  does not touch, try padding before believing anything else
 - **Globals and struct fields are packed, with no alignment.** A 32-bit field can sit at an odd
   address. On arm64 that costs one extra instruction per access, which turned out not to matter
   (1.5%, E015)
