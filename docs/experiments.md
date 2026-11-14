@@ -1474,3 +1474,90 @@ executors g86m is at 189 against rustx86's 171.
 What this does not show: that the two general paths are equally well written. rustx86's saves a
 352-byte copy of the CPU for every instruction on that path, which g86m's 128-byte copy does
 not; some of the 568 is that. The comparison is between two programs, not two compilers.
+
+## E019: What the 35% between Rust and Goose in E002 is made of (2026-11-14)
+
+- **Hypothesis**: E002 found the same fragment of an emulator 35% slower in Goose than in Rust
+  and left the cause open, with aliasing as the untested candidate. Since then two things have
+  been learned about the code Goose produces (E010, E015): an integer `match` with ranges is a
+  chain of comparisons where Rust makes a jump table, and small helpers are calls where Rust
+  inlines them. The fragment (`probe/m0.goose`) has both: a `match` over the opcode with seven
+  ranges, and about twenty helpers. If those two are the 35%, then writing the Goose fragment
+  with a two-level `match` and `inline fn` brings it within 10% of the Rust one, and aliasing
+  is not needed to explain anything.
+- **What changed since last time**: E002 compared times only. This compares host instructions
+  per guest instruction as well, which separates "more instructions" from "slower instructions",
+  and changes the Goose fragment one thing at a time. The Rust fragment and the workload
+  (bench.bin, 369,095,178 instructions) are E002's, unchanged.
+- **Next move for each result**:
+  - Within 10% with both changes → the difference is what each compiler does unasked, not what
+    the language can reach; say which change is worth how much
+  - Still more than 10% slower → look at the two hot loops side by side in assembly for what is
+    left (a reload after each write to RAM would show as loads of the CPU state that Rust does
+    not have), and test aliasing directly by keeping the registers in locals
+  - Goose becomes faster than Rust → check that the two still do the same work (same final
+    registers, same instruction count) before believing it
+- **Cut-off**: The same day. Median of five runs; the variants of the fragment are kept in
+  `probe/` only if they are what the result rests on.
+
+### Result
+
+2026-11-14. **The hypothesis held, for a different reason than the one given. With one change the
+Goose fragment is within 7% of the Rust one. The change is the `match`; `inline fn` does
+nothing here.** bench.bin, 369,095,178 instructions, same final registers in every variant.
+Times are the median of seven interleaved runs; host instructions and cycles from
+`/usr/bin/time -l`.
+
+| Fragment | Time | Against Rust | Host instructions per guest instruction | Cycles |
+|---|---:|---:|---:|---:|
+| Rust (`probe/m0.rs`, rustc 1.97.1, `-C opt-level=3`) | 1287 ms | | 52.0 | 4.0 billion |
+| Goose as in E002 (`probe/m0.goose`) | 1763 ms | +37% | 61.2 | 5.4 billion |
+| Goose, helpers marked `inline fn` | 1716 ms | +33% | 60.5 | 5.4 billion |
+| Goose, two-level `match` (on `op >> 4`, then within the row) | 1532 ms | +19% | 60.2 | 4.7 billion |
+| Goose, two-level `match`, flags written once per operation | 1553 ms | +21% | 59.9 | 4.8 billion |
+| Goose, two-level `match`, RAM as 32-bit cells | 1768 ms | +37% | 62.9 | 5.5 billion |
+| Goose, one `match` with every value listed, no ranges (`probe/m0_flat.goose`) | 1375 ms | +7% | 58.8 | 4.3 billion |
+
+What each row says:
+
+- **The 35% of E002 was mostly not extra instructions.** The original Goose fragment runs 18%
+  more host instructions than Rust and takes 37% more cycles: its instructions are also slower.
+  That is the signature of branches that are predicted badly, and a chain of comparisons on the
+  opcode is exactly that. The two-level `match` keeps the instruction count (60.2) and removes
+  a seventh of the cycles
+- **Listing the values removes the rest of it.** A `match` whose arms are plain values, with
+  `0x40, 0x41, ..., 0x47 =>` where there was `0x40..0x48 =>`, becomes one jump table in the C
+  compiler's hands, which is what rustc makes of a `match` with ranges. Seen in the assembly:
+  the Rust loop fetches a byte, bounds-tests it and jumps through one table; the two-level Goose
+  loop jumps through a table of 13 rows and then compares again inside the row
+- **`inline fn` does nothing here**, because in a 250-line program the C compiler had already
+  inlined everything into `main`. In g86m it was worth a quarter (E015) because `exec_one` is
+  too large for the C compiler to inline into
+- **Aliasing, E002's untested candidate, is not it.** Writing the six flags once (so that no
+  flag is read back from memory) changes nothing: the C compiler had already merged them. Giving
+  RAM a different element type from every CPU field, so that a write to RAM cannot be taken for
+  a write to the CPU state, makes it slightly worse
+- **About 7 host instructions per guest instruction remain** (58.8 against 52.0), worth 7% in
+  time. Both programs keep the CPU state in memory and fetch a byte in the same eight
+  instructions. What the rest is was not found: stepping in the debugger, the tool for this,
+  does not respond in this environment
+
+**It does not carry over to g86m as it is.** g86m's dispatch was flattened the same way, by
+script: one `match` over the opcode with every value listed, in `exec_general` and in
+`two_byte`. All tests passed and all three benchmarks got slightly worse:
+
+| | Two-level (kept) | One level, values listed |
+|---|---:|---:|
+| bench.bin | 97.3 billion host instructions | 100.2 billion |
+| test386 | 23.8 billion | 24.2 billion |
+| Linux boot | 312.6 billion | 315.6 billion |
+
+So it was taken out. Why the fragment gains and g86m loses was not established. Two differences
+that could matter: g86m's first-level table already sends an opcode to a row of at most sixteen,
+so there was less to gain; and its general path now runs only the instructions that have no
+short executor, about a tenth of a Linux boot.
+
+What this says about the two languages, and what it does not: on this fragment the difference
+between Rust and Goose is what the compilers make of a `match` over integers, and a programmer
+who knows that can close most of it. It is one program of 250 lines. It says nothing about
+programs that use what Rust has and Goose lacks, or the reverse.
