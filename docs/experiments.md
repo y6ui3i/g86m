@@ -1613,7 +1613,8 @@ more); test386 is byte for byte the reference.
 - **The other way to shorten it is not to run it**: the payload is gzip (8.6 MB, to about
   20 MB). Inflating it on the host and entering the kernel where the decompressor would have
   jumped would take the phase's 3.7 s off a 19 s boot. That changes what is emulated (the
-  guest's own decompressor never runs), so it is a decision and not an optimisation; not done
+  guest's own decompressor never runs), so it is a decision and not an optimisation. Put to the
+  owner, who decided against it: g86m boots a kernel image by running it
 
 **The tests found two things, neither of them what they were written for.**
 
