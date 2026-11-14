@@ -10,6 +10,10 @@ import state;
 
 var ram: u8[RAM_SIZE];
 
+// The decode cache: one entry per instruction address, by its low bits.
+var dc: Decoded[DC_SIZE] = [Decoded { bytes: 0, mask: 0, pre: Pre { op: 0, plen: 0, osz: 16, asz32: false, lock: false, rep: 0, seg: -1, spare: 0 },
+                                     tag: 0xFFFFFFFF, m: 0, disp: 0 }; DC_SIZE];
+
 // Ports nothing answers: counted per port so a run can report what the guest probed.
 var unknown_ports: u8[65536] = [0; 65536];
 

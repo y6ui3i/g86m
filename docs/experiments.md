@@ -1202,3 +1202,100 @@ first, and add a lookup and the handling of code that is written to. From the li
 that is roughly 60 host instructions saved and 20 added, and somewhat more for instructions with
 a memory operand: an estimate of 10 to 20% on the boot, for rewriting how `exec_one` gets its
 operands. Not started; it needs its own card.
+
+## E017: Remember how an instruction decodes (2026-11-14)
+
+- **Hypothesis**: Decoding is a large share of what an instruction costs, and it is the same
+  every time the instruction runs. Measured before starting, in host instructions per guest
+  instruction (`probe/bench32.asm`, the loop's own cost subtracted): NOP 161; `mov eax, edx` 250;
+  `lea eax, [ebx+8]` 300; `lea eax, [ebx+edx*4+8]` 344; `mov eax, [ebx+8]` 382; the same with an
+  FS override 442; `mov ax, dx` (an operand-size prefix) 308. So a ModRM byte costs about 90, a
+  displacement or SIB byte 50 to 90 more, and each prefix about 60. A cache that keeps, per
+  instruction address, the prefixes, the opcode and the decoded operand, and replays them when
+  the bytes are still the same, should take the boot below 500 billion host instructions (it is
+  584 billion).
+- **What changed since last time**: E016 estimated this from a listing taken before E015 and
+  was wrong; this estimate is from measurements on the current build. The design is the smallest
+  one that could work in Goose, which has no function pointers, so the opcode is still dispatched
+  by `match`: only the parsing is skipped. An entry is validated by comparing the instruction's
+  first eight bytes with the bytes it was made from, so nothing has to watch writes to memory,
+  and code that modifies itself simply misses. Immediate operands are not cached; they are
+  fetched as before.
+- **Next move for each result**:
+  - Below 500 billion → keep; measure what a cached NOP and a cached `mov eax, [ebx+8]` cost now,
+    and say what the dispatch itself costs
+  - Between 500 and 555 billion (5 to 15%) → keep only if the micro-benchmarks show where the
+    rest went (a slow lookup can be fixed; a cache that mostly misses cannot)
+  - Above 555 billion (under 5%) → take it out
+  - A test fails → compare the trace with the cache switched off; the first differing line names
+    the instruction whose replay is wrong
+- **Cut-off**: The same day. `tools/difftest.sh` at 45 of 45, test386 byte for byte, the boot at
+  exactly 1,651,240,001 instructions, and a new self-check in which code overwrites an
+  instruction that has already run and runs it again.
+
+### Result
+
+2026-11-14. **The hypothesis held in the end, by a small margin: 501 billion host instructions on
+the boot, against a target of 500. The first version made things worse.** Release build, median
+of three, against main after E015:
+
+| Benchmark | Before | After | Change |
+|---|---:|---:|---:|
+| Linux boot to the shell prompt | 32.3 s, 584 billion host instructions | 29.6 s, 501 billion | 8% less time, 14% fewer instructions |
+| test386 | 1511 ms | 1376 ms | 9% less time |
+| bench.bin (real mode) | 4449 ms | 4523 ms | no change (2% slower, inside the spread) |
+
+The boot still runs 1,651,240,001 instructions; `tools/difftest.sh` is at 47 of 47 (two more: the
+new `s_smc` on both builds); test386 is byte for byte the reference.
+
+Host instructions per guest instruction, before and after (`probe/bench32.asm`):
+
+| Instruction | Before | After |
+|---|---:|---:|
+| `nop` | 161 | 169 |
+| `mov eax, edx` | 250 | 213 |
+| `lea eax, [ebx+8]` | 300 | 236 |
+| `lea eax, [ebx+edx*4+8]` | 344 | 246 |
+| `mov eax, [ebx+8]` | 382 | 288 |
+| `mov eax, [fs:ebx+8]` | 442 | 302 |
+| `mov ax, dx` | 308 | 213 |
+| `mov eax, 0x12345678` | 215 | 193 |
+| `add eax, 5` | 369 | 318 |
+| `mov [ebx+8], eax` | 378 | 290 |
+
+A prefix is now free, and a memory operand costs about 25 to decode instead of 50 to 90. A NOP
+is slightly dearer: looking it up costs as much as decoding it did.
+
+How it got there, on the boot:
+
+| Step | Host instructions |
+|---|---:|
+| Before | 584 billion |
+| The cache as first written | 603 billion |
+| Eight byte loads made one (see below) | 572 billion |
+| The decode state as one 8-byte struct, copied whole; the two code sizes in separate halves of the table; "the page is in RAM" worked out once per page | 558 billion |
+| The cached operand replayed inline; only the parser is a call | 523 billion |
+| An instruction that has an entry fetches its remaining bytes without checks | 512 billion |
+| A short path for a flat 4 GB data segment in the segment check | 501 billion |
+
+- **The first version was slower than no cache.** The lookup compared eight bytes of the
+  instruction with eight bytes in the entry, and reading those eight bytes was sixteen host
+  instructions with eight bounds checks. Two things were wrong. The range test was in the
+  caller, as a boolean, where Goose's bounds-check analysis could not use it; moved into the
+  function, against the constant, the checks went. And the index was a `u32`: `ram[p + 1]` with
+  32-bit wrapping arithmetic does not provably follow `ram[p]`, so clang would not merge the
+  loads. With an `i64` index the eight loads are one. The same mistake was in E015's 16- and
+  32-bit memory accesses, and was fixed there too
+- **At 558 billion the card said to take it out** (under 5%). What decided otherwise was the
+  table above: the register form of `mov` was still 71 over a NOP, for an operand that is three
+  fields to load. The replay was a call; inlining it is what made the cache pay
+- **Code that changes itself**: `s_smc` runs an instruction twice, overwrites its opcode, its
+  ModRM byte, a displacement, a prefix, a SIB byte or an immediate, and runs it again. It passes
+  with the cache on and off. With the byte comparison deliberately removed it fails, so it does
+  test what it is there to test
+
+What is not cached, and why the dispatch is the next cost: the opcode is still found by `match`,
+immediates are still fetched, and a NOP still costs 169. Goose has no function pointers, so an
+entry cannot hold "what to run"; it can only hold "what was parsed".
+
+`--no-decode-cache` switches the cache off, for finding a fault in it.

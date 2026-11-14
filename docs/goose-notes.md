@@ -84,6 +84,12 @@ for the total, a debugger stepping one instruction for the detail). See E010 and
   is followed by a test of the fault flag. Marking the helpers of the instruction path `inline fn`
   cut a quarter of the host instructions (E015). It costs build time: inlining one large function
   that is called from many places tripled it
+- **Index with `i64`, and test the range where the indexes are.** Reading eight bytes as
+  `ram[p]`, `ram[p + 1]`, ... with a `u32` `p` stayed eight loads: in 32-bit wrapping arithmetic
+  `p + 1` does not provably follow `p`, so the C compiler will not merge them. With an `i64`
+  index it is one load. And a range test passed in from the caller as a boolean does not remove
+  the bounds checks; `if p < SIZE - 8 { ... }` around the indexing does. `goose build
+  --bce-lines` says which checks are left (E017)
 - **Globals and struct fields are packed, with no alignment.** A 32-bit field can sit at an odd
   address. On arm64 that costs one extra instruction per access, which turned out not to matter
   (1.5%, E015)

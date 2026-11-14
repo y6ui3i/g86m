@@ -24,6 +24,7 @@
 //                  each BIOS service was called
 //   --headless     never open the interactive console
 //   --cpu KIND     386 or i686: the CPU, instead of the one that goes with the image
+//   --no-decode-cache  decode every instruction every time (for finding a fault in the cache)
 //   --faults       report every fault except page faults on standard error
 //   --dump FILE    write the first 1 MB of guest memory to FILE when the run ends
 //   --com FILE     write what the guest sent to COM1 to FILE when the run ends
@@ -309,6 +310,7 @@ fn main() {
         else if a[i] == "--headless" { headless = true; }
         else if a[i] == "--cpu" && i + 1 < a.len { i++; cpu_arg = i; }
         else if a[i] == "--faults" { log_faults = true; }
+        else if a[i] == "--no-decode-cache" { dc_on = false; }
         else if a[i] == "--dump" && i + 1 < a.len { i++; dump_arg = i; }
         else if a[i] == "--com" && i + 1 < a.len { i++; com_arg = i; }
         else if a[i] == "--initrd" && i + 1 < a.len { i++; initrd_arg = i; }

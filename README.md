@@ -139,7 +139,7 @@ To regenerate them, run `ORACLE=/path/to/trace32 tools/difftest.sh`.
 | [src/state.goose](src/state.goose) | Registers, flags, segment caches, control registers, 1 MB of RAM, paging, checked memory access, faults |
 | [src/alu.goose](src/alu.goose) | Arithmetic and flags, shifts and rotates |
 | [src/prot.goose](src/prot.goose) | Descriptors, segment loading, far transfers, interrupt and fault delivery, virtual-8086 mode |
-| [src/exec.goose](src/exec.goose) | Instruction decode and execution |
+| [src/exec.goose](src/exec.goose) | Instruction decode and execution; the cache of decoded instructions |
 | [src/fpu.goose](src/fpu.goose) | The x87 FPU of the i686 machine |
 | [src/bios.goose](src/bios.goose) | Power-on setup and the BIOS services the emulator performs: screen, disk, keyboard, time |
 | [src/dev.goose](src/dev.goose) | Interrupt controllers, timer, keyboard controller, I/O port dispatch |

@@ -199,7 +199,7 @@ fn st80(i: u8) -> u64, u16 {
 
 fn ea(k: u32) -> u32 {
     let o = ea_off + k;
-    if asz32 { return o; }
+    if ins.asz32 { return o; }
     return o & 0xFFFF;
 }
 
@@ -584,7 +584,7 @@ fn set_cmp_flags(rel: i64) {
 // Writes the environment at the operand and returns its size: 28 bytes with a 32-bit operand size,
 // 14 with a 16-bit one. The instruction and operand pointers are written as zero.
 fn store_env() -> u32 {
-    if osz == 32 {
+    if ins.osz == 32 {
         fwr(0, 32, fp_cw);
         fwr(4, 32, status());
         fwr(8, 32, tag_word());
@@ -599,7 +599,7 @@ fn store_env() -> u32 {
 }
 
 fn load_env() -> u32 {
-    let step: u32 = if osz == 32 { 4 } else { 2 };
+    let step: u32 = if ins.osz == 32 { 4 } else { 2 };
     let cw = frd(0, 16) as! u16;
     let sw = frd(step, 16) as! u16;
     let tags = frd(step * 2, 16) as! u16;

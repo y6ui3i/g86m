@@ -89,6 +89,7 @@ var tr_32 = true;            // the task segment is a 32-bit one
 // of privilege level empties the one-entry caches, which do not record the mode, and nothing else.
 var code_page: u32 = 0xFFFFFFFF;
 var code_phys: u32 = 0;
+var code_ok = false;         // the whole page behind code_phys is in RAM, where the decode cache can read it
 var read_page: u32 = 0xFFFFFFFF;
 var read_phys: u32 = 0;
 var write_page: u32 = 0xFFFFFFFF;
@@ -123,6 +124,33 @@ inline fn protected() -> bool { return cr[0] & 1 != 0; }
 inline fn paging() -> bool { return cr[0] & 0x80000000 != 0; }
 inline fn v86() -> bool { return cpu.flags & VM != 0; }
 inline fn iopl() -> u8 { return (cpu.flags >> 12 & 3) as! u8; }
+
+// ---- The decode cache's entries (see exec.goose) ----
+
+// What the prefixes and the opcode byte of an instruction say. Eight bytes, so that taking it
+// from the cache is one copy.
+struct Pre {
+    op: u8,              // the opcode byte
+    plen: u8,            // the length of the prefixes and the opcode byte
+    osz: u8,             // operand size of this instruction: 16 or 32
+    asz32: bool,         // this instruction addresses memory with 32-bit offsets
+    lock: bool,          // the instruction has a LOCK prefix
+    rep: u8,             // 0 none, 1 REPNE (F2), 2 REP/REPE (F3)
+    seg: i8,             // segment override: -1 none, else ES CS SS DS FS GS
+    spare: u8,
+}
+
+struct Decoded {
+    bytes: u64,          // the first eight bytes of the instruction, as they were when it was decoded
+    mask: u64,           // which of those bytes the entry depends on
+    pre: Pre,
+    tag: u32,            // the instruction's linear address; FFFFFFFFh for an empty entry
+    m: u32,              // the operand, once the instruction has asked for it
+    disp: u32,           // the operand's displacement
+}
+
+let DC_HALF = 8192;      // entries for 16-bit code segments, then as many for 32-bit ones
+let DC_SIZE = 16384;
 
 // ---- Faults ----
 
@@ -172,8 +200,9 @@ inline fn set_mem8(a: u32, v: u8) {
 inline fn mem16(a: u32) -> u16 {
     let p = a & phys_mask;
     if p < RAM_SIZE - 1 && p < phys_mask {
-        let b0: u16 = ram[p];
-        let b1: u16 = ram[p + 1];
+        let q: i64 = p;          // a 64-bit index, so that the two loads can become one
+        let b0: u16 = ram[q];
+        let b1: u16 = ram[q + 1];
         return b0 | b1 << 8;
     }
     let lo: u16 = mem8(a);
@@ -184,8 +213,9 @@ inline fn mem16(a: u32) -> u16 {
 inline fn set_mem16(a: u32, v: u16) {
     let p = a & phys_mask;
     if p < RAM_SIZE - 1 && p < phys_mask {
-        ram[p] = v as! u8;
-        ram[p + 1] = (v >> 8) as! u8;
+        let q: i64 = p;
+        ram[q] = v as! u8;
+        ram[q + 1] = (v >> 8) as! u8;
         return;
     }
     set_mem8(a, v as! u8);
@@ -195,10 +225,11 @@ inline fn set_mem16(a: u32, v: u16) {
 inline fn mem32(a: u32) -> u32 {
     let p = a & phys_mask;
     if p < RAM_SIZE - 3 && p + 3 <= phys_mask {
-        let b0: u32 = ram[p];
-        let b1: u32 = ram[p + 1];
-        let b2: u32 = ram[p + 2];
-        let b3: u32 = ram[p + 3];
+        let q: i64 = p;
+        let b0: u32 = ram[q];
+        let b1: u32 = ram[q + 1];
+        let b2: u32 = ram[q + 2];
+        let b3: u32 = ram[q + 3];
         return b0 | b1 << 8 | b2 << 16 | b3 << 24;
     }
     let lo: u32 = mem16(a);
@@ -209,10 +240,11 @@ inline fn mem32(a: u32) -> u32 {
 inline fn set_mem32(a: u32, v: u32) {
     let p = a & phys_mask;
     if p < RAM_SIZE - 3 && p + 3 <= phys_mask {
-        ram[p] = v as! u8;
-        ram[p + 1] = (v >> 8) as! u8;
-        ram[p + 2] = (v >> 16) as! u8;
-        ram[p + 3] = (v >> 24) as! u8;
+        let q: i64 = p;
+        ram[q] = v as! u8;
+        ram[q + 1] = (v >> 8) as! u8;
+        ram[q + 2] = (v >> 16) as! u8;
+        ram[q + 3] = (v >> 24) as! u8;
         return;
     }
     set_mem16(a, v as! u16);
@@ -307,6 +339,11 @@ fn sys_write(a: u32, w: u8, v: u32) { lin_write(a, w, v, false); }
 // A violation is a stack fault for SS and a general protection fault for the others.
 inline fn seg_check(s: i64, off: u32, w: u8, write: bool) -> u32 {
     let a = cpu.attr[s];
+    // The common case first: a valid, writable data segment that covers all 4 GB, and an access
+    // that does not run off the end of it. Nothing below would object.
+    if cpu.limit[s] == 0xFFFFFFFF && (a & (A_VALID | A_CODE | A_DOWN_CONF | A_RW)) == (A_VALID | A_RW) && off <= 0xFFFFFFFC {
+        return cpu.base[s] + off;
+    }
     let last = off + ((w as u32) >> 3) - 1;
     var bad = last < off;
     if protected() && !v86() {
