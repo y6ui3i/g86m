@@ -1132,3 +1132,73 @@ Goose's own `-O2`. The wrapper is not kept, since none of its uses was.
 So the configuration stays as it was. Being allowed to spend build time buys nothing at this
 point; the interpreter's remaining cost is in what it does for each instruction, not in how well
 that is compiled.
+
+## E016: Check the instruction bytes once per instruction, not once per byte (2026-11-14)
+
+- **Hypothesis**: After E015 a guest instruction still pays for each byte it fetches: a segment
+  limit test, a page comparison, a physical-address mask and a RAM range test, and a wrap test on
+  the instruction pointer, about 35 host instructions for the opcode byte alone, and an
+  instruction has two to six bytes. One test at the start of the instruction ("the next 16 bytes
+  lie in the page already translated, inside the segment and inside RAM") makes every fetch in
+  that instruction a plain load. On the Linux boot that should remove more than a tenth of the
+  host instructions.
+- **What changed since last time**: E015 named a decoded-instruction cache as the next step.
+  This is a smaller step toward the same cost, taken first because it cannot go stale: nothing is
+  remembered from one execution to the next, so code that modifies itself needs no handling.
+  What the cache would add on top (not fetching at all) is measured against this, not against
+  E015.
+- **Next move for each result**:
+  - More than 10% fewer host instructions on the boot → keep; then list what a NOP still costs
+    and decide whether the cache is worth its invalidation logic
+  - Less than 5% → the fetches were not where the cost was; take it out, and go by the listing of
+    one instruction again before building anything larger
+  - A test fails → the window is wrong at an edge (page end, segment limit, 64 KB wrap in 16-bit
+    code, an instruction of more than 15 bytes); fix the condition, not the test
+- **Cut-off**: The same day. `tools/difftest.sh` at 45 of 45, test386 byte for byte, and the boot
+  must still take exactly 1,651,240,001 instructions to the prompt.
+
+### Result
+
+2026-11-14. **The hypothesis was wrong. One check per instruction instead of one per byte removed
+2.2% of the host instructions on the boot (584 to 571 billion, 32.3 s to 31.6 s), under the 5% the
+card set, and it was taken out.** The boot still took 1,651,240,001 instructions and test386 was
+byte for byte the reference with it in.
+
+The estimate behind the card was stale. The 35 host instructions for an opcode byte were counted
+before E015 inlined `fetch8`; after it, a fetch on the fast path is already short, and the page
+comparison and limit test that the window removes are a few instructions each.
+
+With the card's own next move ("go by the listing of one instruction again") the debugger stopped
+responding in this environment, three times, so the question was put differently: is the average
+high because of something other than ordinary instructions? Three things were measured instead.
+
+| Question | Measurement | Answer |
+|---|---|---|
+| Do repeated string instructions hide many iterations in one step? | Counted them on the boot: 14.5 million string instructions, 78 million iterations, against 1,651 million instructions | No. About 3% of the work at most |
+| Is the boot waiting, in loops that run until time has passed? | Booted with 8, 16, 32, 64, 128 and 256 instructions per timer tick | No. See below |
+| Is a memory instruction much dearer than a NOP? | `probe/bench32.asm`, after E015: NOP 197, `mov eax, [ebx+8]` 264, `add [ebx+8], eax` 307 host instructions per guest instruction, each averaged with the loop's DEC and JNZ | Dearer, not by a multiple |
+
+Instructions to the prompt, by instructions per timer tick:
+
+| Per tick | 8 | 16 | 32 | 64 | 128 | 256 |
+|---|---:|---:|---:|---:|---:|---:|
+| Millions of instructions | 2171 | 1768 | 1639 | 1651 | 1767 | 2055 |
+| Seconds | 45.4 | 35.9 | 32.3 | 31.8 | 33.5 | 38.1 |
+
+The count has a minimum between 32 and 64. Below it the timer interrupts more often for the same
+work; above it the kernel's time-based loops run for more instructions. If the boot were mostly
+waiting, the count would keep falling as the tick got shorter. It does not: the boot is work, and
+the 64 that rustx86 chose is already at the bottom. (The `--tick` option used for this was not
+kept.)
+
+So both sides of "guest instructions times host instructions each" have been looked at. The left
+side is at its minimum. The right side is about 350 on the boot: about 150 that every instruction
+pays, and about 200 for what the instruction does, spread over decoding the operand, checking the
+segment, translating the address and the access itself, none of which stands out.
+
+What is left is not a tweak. A cache of decoded instructions would remove the opcode fetch, the
+prefix tests, the reset of the decode state and the operand decode on every execution but the
+first, and add a lookup and the handling of code that is written to. From the listing of a NOP
+that is roughly 60 host instructions saved and 20 added, and somewhat more for instructions with
+a memory operand: an estimate of 10 to 20% on the boot, for rewriting how `exec_one` gets its
+operands. Not started; it needs its own card.
