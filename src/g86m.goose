@@ -206,6 +206,7 @@ fn run_until(limit: i64) -> i64 {
         if scripted && next_poll < stop_at { stop_at = next_poll; }
         if trace || trace_after >= 0 { stop_at = vtime + 1; }
         replan = false;
+        chain_until = stop_at;
         loop {
             step();
             vtime++;
