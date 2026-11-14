@@ -1,15 +1,18 @@
 // The x87 floating-point unit of the i686 machine.
 //
-// A register holds an f64. Real hardware holds 80 bits: 64 of mantissa, where an f64 has 53. That
-// is enough for what C libraries do with the x87 (strtod, printf, the math functions), and it is
-// the same trade rustx86 made. Two things soften it:
+// A register holds a value in two forms: an f64, and, when the value has one, its exact 80-bit
+// original (64 bits of mantissa, where an f64 has 53).
 //
-// - An 80-bit value that is loaded and stored again without arithmetic in between keeps all its
-//   bits: the register remembers the original beside the f64. Saving and restoring the whole unit
-//   (FNSAVE, FRSTOR), which an operating system does on every task switch, is therefore exact.
-// - The rounding direction in the control word is honoured. f64 arithmetic only rounds to nearest,
-//   so a directed rounding is made from the sign of the exact residual: if the nearest result lies
-//   on the wrong side of the true one, the neighbouring f64 is taken.
+// - Add, subtract, multiply and divide work on the 80-bit form, in integers, and round as the
+//   control word says: to 64, 53 or 24 bits of mantissa, in any of the four directions. So does
+//   comparison, and so does conversion to and from integers. C libraries depend on this: musl's
+//   printf decides how to round a digit by asking whether 2^64 plus a small number is 2^64.
+// - A value that is only moved keeps all its bits, which makes saving and restoring the whole
+//   unit (FNSAVE, FRSTOR) exact.
+// - Everything else is computed as an f64: the square root, the functions that go through libm,
+//   and arithmetic whose operands or result are not ordinary numbers (zeros, infinities, NaNs,
+//   denormals, overflow). There the rounding direction is made from the sign of the exact
+//   residual: if the nearest f64 lies on the wrong side of the true result, its neighbour is taken.
 //
 // No floating-point exception is ever raised, and the exception bits of the status word stay
 // zero. What a masked exception would produce (a NaN, an infinity, a zero) is what f64 arithmetic
@@ -63,6 +66,16 @@ fn set_st(i: u8, v: f64) {
     let p = phys(i);
     fp[p] = v;
     fp_raw[p] = false;
+    fp_empty &= 0xFF ^ bit8(p);
+}
+
+// Sets ST(i) to an 80-bit value.
+fn set_st80(i: u8, mant: u64, se: u16) {
+    let p = phys(i);
+    fp[p] = f80_to_f64(mant, se);
+    fp_mant[p] = mant;
+    fp_se[p] = se;
+    fp_raw[p] = true;
     fp_empty &= 0xFF ^ bit8(p);
 }
 
@@ -311,21 +324,258 @@ fn to_int(r: f64, bits: i32) -> u64 {
     return (r as! i64) as! u64;
 }
 
+// ---- Arithmetic on the 80-bit format ----
+
+// An ordinary number: not zero, a denormal, an infinity or a NaN, and with its integer bit set.
+fn normal80(m: u64, se: u16) -> bool {
+    let e = se & 0x7FFF;
+    return e != 0 && e != 0x7FFF && m >> 63 != 0;
+}
+
+// The exponent field, as a number to calculate with.
+fn exp80(se: u16) -> i64 { return se & 0x7FFF; }
+
+fn zero80(m: u64, se: u16) -> bool { return m == 0 && se & 0x7FFF == 0; }
+fn nan80(m: u64, se: u16) -> bool { return se & 0x7FFF == 0x7FFF && m << 1 != 0; }
+
+// The 128-bit product of two 64-bit numbers: high half, low half.
+fn mul64(a: u64, b: u64) -> u64, u64 {
+    let al = a & 0xFFFFFFFF;
+    let ah = a >> 32;
+    let bl = b & 0xFFFFFFFF;
+    let bh = b >> 32;
+    let ll = al * bl;
+    let lh = al * bh;
+    let hl = ah * bl;
+    let mid = (ll >> 32) + (lh & 0xFFFFFFFF) + (hl & 0xFFFFFFFF);
+    return ah * bh + (lh >> 32) + (hl >> 32) + (mid >> 32), (mid << 32) | (ll & 0xFFFFFFFF);
+}
+
+// Rounds an exact result to the precision and direction of the control word and packs it. hi is
+// the mantissa with its top bit set, lo what lies below it: its top bit is the half, and any other
+// bit set means "something more". The third result is false when the exponent has left the range
+// of ordinary numbers; the caller then computes the operation as an f64.
+fn round_pack(sign: u16, e0: i64, hi0: u64, lo: u64) -> u64, u16, bool {
+    var e = e0;
+    var hi = hi0;
+    let pc = fp_cw >> 8 & 3;
+    let cut = if pc == 3 { 0 } else if pc == 0 { 40 } else { 11 };      // mantissa bits given up
+    var half = false;
+    var sticky = false;
+    var unit: u64 = 1;
+    if cut == 0 {
+        half = lo >> 63 != 0;
+        sticky = lo << 1 != 0;
+    } else {
+        unit = unit << cut;
+        let dropped = hi & (unit - 1);
+        half = dropped >> (cut - 1) != 0;
+        sticky = dropped & ((unit >> 1) - 1) != 0 || lo != 0;
+        hi -= dropped;
+    }
+    let dir = rc();
+    var up = false;
+    if dir == 0 { up = half && (sticky || hi & unit != 0); }
+    else if dir == 1 { up = sign != 0 && (half || sticky); }
+    else if dir == 2 { up = sign == 0 && (half || sticky); }
+    if up {
+        hi += unit;
+        if hi == 0 { hi = TOP_BIT; e += 1; }     // the mantissa carried out
+    }
+    if e <= 0 || e >= 0x7FFF { return 0, 0, false; }
+    return hi, sign | (e as! u16), true;
+}
+
+// a + b. Subtraction is addition with b's sign turned.
+fn soft_add(am0: u64, ase0: u16, bm0: u64, bse0: u16) -> u64, u16, bool {
+    var am = am0; var ase = ase0; var bm = bm0; var bse = bse0;
+    // Adding zero must not cost the other operand its low bits.
+    if zero80(bm, bse) && normal80(am, ase) { return round_pack(ase & 0x8000, exp80(ase), am, 0); }
+    if zero80(am, ase) && normal80(bm, bse) { return round_pack(bse & 0x8000, exp80(bse), bm, 0); }
+    if !normal80(am, ase) || !normal80(bm, bse) { return 0, 0, false; }
+    if ase & 0x7FFF < bse & 0x7FFF || (ase & 0x7FFF == bse & 0x7FFF && am < bm) {
+        let tm = am; am = bm; bm = tm;
+        let ts = ase; ase = bse; bse = ts;
+    }
+    var e = exp80(ase);
+    let d = e - exp80(bse);
+    // b, moved down to a's exponent, as 128 bits. Bits that fall off the end leave a mark.
+    var bh: u64 = 0;
+    var bl: u64 = 0;
+    if d == 0 { bh = bm; }
+    else if d < 64 { bh = bm >> d; bl = bm << (64 - d); }
+    else if d == 64 { bl = bm; }
+    else if d < 128 { bl = bm >> (d - 64); if bm << (128 - d) != 0 { bl |= 1; } }
+    else { bl = 1; }
+    var hi: u64 = 0;
+    var lo: u64 = 0;
+    if ase & 0x8000 == bse & 0x8000 {
+        lo = bl;
+        hi = am + bh;
+        if hi < am {                             // carried out: one place down
+            lo = (lo >> 1) | (lo & 1) | (hi << 63);
+            hi = (hi >> 1) | TOP_BIT;
+            e += 1;
+        }
+    } else {
+        let borrow: u64 = if bl != 0 { 1 } else { 0 };
+        lo = 0 - bl;
+        hi = am - bh - borrow;
+        if hi == 0 && lo == 0 {
+            // Exactly zero: positive, except when rounding down.
+            let zs: u16 = if rc() == 1 { 0x8000 } else { 0 };
+            return 0, zs, true;
+        }
+        if hi == 0 { hi = lo; lo = 0; e -= 64; }
+        let lz = clz(hi);
+        if lz > 0 { hi = (hi << lz) | (lo >> (64 - lz)); lo = lo << lz; e -= lz; }
+    }
+    return round_pack(ase & 0x8000, e, hi, lo);
+}
+
+fn soft_mul(am: u64, ase: u16, bm: u64, bse: u16) -> u64, u16, bool {
+    if !normal80(am, ase) || !normal80(bm, bse) { return 0, 0, false; }
+    var e = exp80(ase) + exp80(bse) - 16383 + 1;
+    var hi, lo = mul64(am, bm);
+    if hi >> 63 == 0 { hi = (hi << 1) | (lo >> 63); lo = lo << 1; e -= 1; }
+    return round_pack((ase ^ bse) & 0x8000, e, hi, lo);
+}
+
+// a / b, by long division: 64 quotient bits, one more for the half, and whether anything is left.
+fn soft_div(am: u64, ase: u16, bm: u64, bse: u16) -> u64, u16, bool {
+    if !normal80(am, ase) || !normal80(bm, bse) { return 0, 0, false; }
+    var e = exp80(ase) - exp80(bse) + 16383 - 1;
+    var q: u64 = 0;
+    var rem = am;
+    var n = 64;
+    if am >= bm { rem = am - bm; q = 1; n = 63; e += 1; }
+    for k in n {
+        let carry = rem >> 63 != 0;
+        rem = rem << 1;
+        q = q << 1;
+        if carry || rem >= bm { rem -= bm; q |= 1; }
+    }
+    var lo: u64 = 0;
+    let carry = rem >> 63 != 0;
+    rem = rem << 1;
+    if carry || rem >= bm { rem -= bm; lo = TOP_BIT; }
+    if rem != 0 { lo |= 1; }
+    return round_pack((ase ^ bse) & 0x8000, e, q, lo);
+}
+
+// The six arithmetic operations on 80-bit operands: a is ST(0), b the other. Ordinary numbers are
+// computed exactly; anything else goes through f64.
+fn arith80(r: u8, am: u64, ase: u16, bm: u64, bse: u16) -> u64, u16 {
+    match r {
+        0 => { let m, se, ok = soft_add(am, ase, bm, bse); if ok { return m, se; } },
+        1 => { let m, se, ok = soft_mul(am, ase, bm, bse); if ok { return m, se; } },
+        4 => { let m, se, ok = soft_add(am, ase, bm, bse ^ 0x8000); if ok { return m, se; } },
+        5 => { let m, se, ok = soft_add(bm, bse, am, ase ^ 0x8000); if ok { return m, se; } },
+        6 => { let m, se, ok = soft_div(am, ase, bm, bse); if ok { return m, se; } },
+        _ => { let m, se, ok = soft_div(bm, bse, am, ase); if ok { return m, se; } },
+    }
+    let fm, fse = f64_to_f80(arith(r, f80_to_f64(am, ase), f80_to_f64(bm, bse)));
+    return fm, fse;
+}
+
+fn i64_to_f80(v: i64) -> u64, u16 {
+    if v == 0 { return 0, 0; }
+    let sign: u16 = if v < 0 { 0x8000 } else { 0 };
+    let bits = v as! u64;
+    let mag = if v < 0 { 0 - bits } else { bits };
+    let lz = clz(mag);
+    let e = (16383 + 63 - lz) as! u16;
+    return mag << lz, sign | e;
+}
+
+// The magnitude of an ordinary 80-bit number rounded to an integer in the given direction (the
+// control word's encoding: nearest, down, up, toward zero). False when it needs more than 63 bits.
+fn round80(m: u64, se: u16, mode: u16) -> u64, bool {
+    let e = exp80(se) - 16383;
+    if e >= 63 { return 0, false; }
+    let neg = se & 0x8000 != 0;
+    let shift = 63 - e;
+    var n: u64 = 0;
+    var half = false;
+    var sticky = false;
+    if shift >= 65 { sticky = true; }
+    else if shift == 64 { half = true; sticky = m << 1 != 0; }
+    else {
+        let one: u64 = 1;
+        n = m >> shift;
+        half = m >> (shift - 1) & 1 != 0;
+        sticky = m & ((one << (shift - 1)) - 1) != 0;
+    }
+    var up = false;
+    if mode == 0 { up = half && (sticky || n & 1 != 0); }
+    else if mode == 1 { up = neg && (half || sticky); }
+    else if mode == 2 { up = !neg && (half || sticky); }
+    if up { n += 1; }
+    return n, true;
+}
+
+// ST(0) as an integer of the given width, in two's complement, rounded in the given direction.
+fn st_int(bits: i32, mode: u16) -> u64 {
+    let m, se = st80(0);
+    if normal80(m, se) {
+        let mag, ok = round80(m, se, mode);
+        if ok {
+            let one: u64 = 1;
+            let lim = one << (bits - 1);
+            let neg = se & 0x8000 != 0;
+            if mag > lim || (mag == lim && !neg) { return lim; }       // the integer indefinite
+            if neg { return 0 - mag; }
+            return mag;
+        }
+    }
+    var v = st(0);
+    match mode {
+        0 => { v = rint(v); },
+        1 => { v = floor(v); },
+        2 => { v = ceil(v); },
+        _ => { v = trunc(v); },
+    }
+    return to_int(v, bits);
+}
+
 // ---- Comparison ----
 
-fn compare(a: f64, b: f64) {
+// -1, 0 or 1 for a below, equal to or above b; 2 when either is a NaN.
+fn cmp80(am: u64, ase: u16, bm: u64, bse: u16) -> i64 {
+    if nan80(am, ase) || nan80(bm, bse) { return 2; }
+    let an = ase & 0x8000 != 0;
+    let bn = bse & 0x8000 != 0;
+    if am == 0 && bm == 0 { return 0; }
+    if am == 0 { return if bn { 1 } else { -1 }; }
+    if bm == 0 { return if an { -1 } else { 1 }; }
+    if an != bn { return if an { -1 } else { 1 }; }
+    var rel = 0;
+    let ea = ase & 0x7FFF;
+    let eb = bse & 0x7FFF;
+    if ea != eb { rel = if ea > eb { 1 } else { -1 }; }
+    else if am != bm { rel = if am > bm { 1 } else { -1 }; }
+    return if an { -rel } else { rel };
+}
+
+fn cmp_st(i: u8) -> i64 {
+    let am, ase = st80(0);
+    let bm, bse = st80(i);
+    return cmp80(am, ase, bm, bse);
+}
+
+fn set_cond(rel: i64) {
     fp_cond &= 0xFFFF ^ (C0 | C2 | C3);
-    if is_nan(a) || is_nan(b) { fp_cond |= C0 | C2 | C3; }
-    else if a < b { fp_cond |= C0; }
-    else if a == b { fp_cond |= C3; }
+    if rel == 2 { fp_cond |= C0 | C2 | C3; }
+    else if rel < 0 { fp_cond |= C0; }
+    else if rel == 0 { fp_cond |= C3; }
 }
 
 // FCOMI and its relatives: the result goes to ZF, PF and CF.
-fn compare_flags(a: f64, b: f64) {
+fn set_cmp_flags(rel: i64) {
     var f = cpu.flags & 0xFFFFFFBA;
-    if is_nan(a) || is_nan(b) { f |= ZF | PF | CF; }
-    else if a < b { f |= CF; }
-    else if a == b { f |= ZF; }
+    if rel == 2 { f |= ZF | PF | CF; }
+    else if rel < 0 { f |= CF; }
+    else if rel == 0 { f |= ZF; }
     cpu.flags = f;
 }
 
@@ -371,11 +621,15 @@ fn fpu_unknown() {
 var cpu_op: u8 = 0;
 
 // Arithmetic or comparison of ST(0) with b, the result going to ST(dest).
-fn arith_to(r: u8, b: f64, dest: u8) {
-    let a = st(0);
-    if r == 2 { compare(a, b); }
-    else if r == 3 { compare(a, b); fpop(); }
-    else { set_st(dest, arith(r, a, b)); }
+fn arith_to(r: u8, bm: u64, bse: u16, dest: u8) {
+    let am, ase = st80(0);
+    if r == 2 || r == 3 {
+        set_cond(cmp80(am, ase, bm, bse));
+        if r == 3 { fpop(); }
+        return;
+    }
+    let m, se = arith80(r, am, ase, bm, bse);
+    set_st80(dest, m, se);
 }
 
 fn fpu_mem(row: u8, r: u8) {
@@ -388,7 +642,8 @@ fn fpu_mem(row: u8, r: u8) {
             4 => { b = f64_of_bits(frd64(0)); },
             _ => { let iv = frd(0, 16) as! i16; b = iv; },
         }
-        arith_to(r, b, 0);
+        let bm, bse = f64_to_f80(b);
+        arith_to(r, bm, bse, 0);
         return;
     }
     match row << 3 | r {
@@ -401,8 +656,8 @@ fn fpu_mem(row: u8, r: u8) {
         0x0F => { fwr(0, 16, fp_cw); },
         // DB
         0x18 => { let iv = frd(0, 32) as! i32; fpush(iv); },
-        0x19 => { fwr(0, 32, to_int(trunc(st(0)), 32) as! u32); fpop(); },      // FISTTP
-        0x1A, 0x1B => { fwr(0, 32, to_int(round_int(st(0)), 32) as! u32); if r == 3 { fpop(); } },
+        0x19 => { fwr(0, 32, st_int(32, 3) as! u32); fpop(); },      // FISTTP
+        0x1A, 0x1B => { fwr(0, 32, st_int(32, rc()) as! u32); if r == 3 { fpop(); } },
         0x1D => {
             let mant = frd64(0);
             let se = frd(8, 16) as! u16;
@@ -419,7 +674,7 @@ fn fpu_mem(row: u8, r: u8) {
         },
         // DD
         0x28 => { fpush(f64_of_bits(frd64(0))); },
-        0x29 => { fwr64(0, to_int(trunc(st(0)), 64)); fpop(); },
+        0x29 => { fwr64(0, st_int(64, 3)); fpop(); },
         0x2A, 0x2B => { fwr64(0, bits_of_f64(st(0))); if r == 3 { fpop(); } },
         0x2C => {                                        // FRSTOR
             let n = load_env();
@@ -447,10 +702,14 @@ fn fpu_mem(row: u8, r: u8) {
         0x2F => { fwr(0, 16, status()); },
         // DF
         0x38 => { let iv = frd(0, 16) as! i16; fpush(iv); },
-        0x39 => { fwr(0, 16, (to_int(trunc(st(0)), 16) as! u16)); fpop(); },
-        0x3A, 0x3B => { fwr(0, 16, (to_int(round_int(st(0)), 16) as! u16)); if r == 3 { fpop(); } },
-        0x3D => { let iv = frd64(0) as! i64; fpush(iv); },
-        0x3F => { fwr64(0, to_int(round_int(st(0)), 64)); fpop(); },
+        0x39 => { fwr(0, 16, (st_int(16, 3) as! u16)); fpop(); },
+        0x3A, 0x3B => { fwr(0, 16, (st_int(16, rc()) as! u16)); if r == 3 { fpop(); } },
+        0x3D => {                                        // FILD of 64 bits: exact, where an f64 is not
+            let m, se = i64_to_f80(frd64(0) as! i64);
+            fp_top = (fp_top + 7) & 7;
+            set_st80(0, m, se);
+        },
+        0x3F => { fwr64(0, st_int(64, rc())); fpop(); },
         _ => { fpu_unknown(); },         // among them FBLD and FBSTP, the packed decimal pair
     }
 }
@@ -469,9 +728,11 @@ fn fpu_reg(row: u8, r: u8, i: u8) {
     let a = st(0);
     let b = st(i);
     let s1 = st(1);                      // for D9 F0 to FF, where the r/m field is part of the opcode
+    let am, ase = st80(0);
+    let bm, bse = st80(i);
     match row << 3 | r {
         // D8: ST(0) = ST(0) op ST(i)
-        0x00..0x08 => { arith_to(r, b, 0); },
+        0x00..0x08 => { arith_to(r, bm, bse, 0); },
         // D9
         0x08 => { fp_top = (fp_top + 7) & 7; copy_st(0, i + 1); },      // FLD ST(i)
         0x09 => { swap_st(i); },
@@ -479,9 +740,9 @@ fn fpu_reg(row: u8, r: u8, i: u8) {
         0x0B => { copy_st(i, 0); fpop(); },
         0x0C => {
             match i {
-                0 => { set_st(0, -a); },                                // FCHS
-                1 => { set_st(0, abs(a)); },                            // FABS
-                4 => { compare(a, 0.0); },                              // FTST
+                0 => { set_st80(0, am, ase ^ 0x8000); },                // FCHS
+                1 => { set_st80(0, am, ase & 0x7FFF); },                // FABS
+                4 => { set_cond(cmp80(am, ase, 0, 0)); },               // FTST
                 5 => {                                                  // FXAM: what kind of number
                     fp_cond &= 0xFFFF ^ (C0 | C1 | C2 | C3);
                     if bits_of_f64(a) >> 63 != 0 { fp_cond |= C1; }
@@ -536,13 +797,27 @@ fn fpu_reg(row: u8, r: u8, i: u8) {
                 1 => { set_st(1, s1 * (log1p(a) / 0.6931471805599453)); fpop(); },       // FYL2XP1
                 2 => { set_st(0, f_sqrt(a)); },
                 3 => { set_st(0, sin(a)); fpush(cos(a)); fp_cond &= 0xFFFF ^ C2; },     // FSINCOS
-                4 => { set_st(0, round_int(a)); },                      // FRNDINT
+                4 => {                                                  // FRNDINT
+                    var done = false;
+                    if normal80(am, ase) {
+                        let mag, ok = round80(am, ase, rc());
+                        if !ok { done = true; }                         // 2^63 or more: already an integer
+                        else if mag != 0 {
+                            let m, se = i64_to_f80(mag as! i64);
+                            set_st80(0, m, se | (ase & 0x8000));
+                            done = true;
+                        }
+                    }
+                    if !done { set_st(0, round_int(a)); }
+                },
                 5 => {                                                  // FSCALE
                     var e = trunc(s1);
                     if is_nan(e) { e = 0.0; }
                     if e > 99999.0 { e = 99999.0; }
                     if e < -99999.0 { e = -99999.0; }
-                    set_st(0, ldexp(a, e as! i32));
+                    let ne = exp80(ase) + (e as! i64);
+                    if normal80(am, ase) && ne > 0 && ne < 0x7FFF { set_st80(0, am, ase & 0x8000 | (ne as! u16)); }
+                    else { set_st(0, ldexp(a, e as! i32)); }
                 },
                 6 => { set_st(0, sin(a)); fp_cond &= 0xFFFF ^ C2; },
                 _ => { set_st(0, cos(a)); fp_cond &= 0xFFFF ^ C2; },
@@ -553,7 +828,7 @@ fn fpu_reg(row: u8, r: u8, i: u8) {
         0x11 => { if flag(ZF) { copy_st(0, i); } },
         0x12 => { if flag(CF | ZF) { copy_st(0, i); } },
         0x13 => { if flag(PF) { copy_st(0, i); } },
-        0x15 => { if i != 1 { fpu_unknown(); } compare(a, b); fpop(); fpop(); },
+        0x15 => { if i != 1 { fpu_unknown(); } set_cond(cmp_st(1)); fpop(); fpop(); },
         // DB: FCMOV on the opposite conditions, the housekeeping row, FUCOMI and FCOMI
         0x18 => { if !flag(CF) { copy_st(0, i); } },
         0x19 => { if !flag(ZF) { copy_st(0, i); } },
@@ -566,24 +841,24 @@ fn fpu_reg(row: u8, r: u8, i: u8) {
                 _ => { fpu_unknown(); },
             }
         },
-        0x1D, 0x1E => { compare_flags(a, b); },
+        0x1D, 0x1E => { set_cmp_flags(cmp_st(i)); },
         // DC: ST(i) = ST(0) op ST(i), the reg field meaning what it means in the D8 row
-        0x20..0x28 => { arith_to(r, b, i); },
+        0x20..0x28 => { arith_to(r, bm, bse, i); },
         // DD
         0x28 => { fp_empty |= bit8(phys(i)); },                         // FFREE
         0x29 => { swap_st(i); },
         0x2A => { copy_st(i, 0); },
         0x2B => { copy_st(i, 0); fpop(); },
-        0x2C => { compare(a, b); },                                     // FUCOM
-        0x2D => { compare(a, b); fpop(); },
+        0x2C => { set_cond(cmp_st(i)); },                               // FUCOM
+        0x2D => { set_cond(cmp_st(i)); fpop(); },
         // DE: as DC, then pop; DE D9 is FCOMPP
-        0x30, 0x31, 0x34..0x38 => { set_st(i, arith(r, a, b)); fpop(); },
-        0x32 => { compare(a, b); fpop(); },
-        0x33 => { if i != 1 { fpu_unknown(); } compare(a, b); fpop(); fpop(); },
+        0x30, 0x31, 0x34..0x38 => { arith_to(r, bm, bse, i); fpop(); },
+        0x32 => { set_cond(cmp_st(i)); fpop(); },
+        0x33 => { if i != 1 { fpu_unknown(); } set_cond(cmp_st(1)); fpop(); fpop(); },
         // DF
         0x38 => { fp_empty |= bit8(phys(i)); fpop(); },                 // FFREEP
         0x3C => { if i != 0 { fpu_unknown(); } set_r16(AX, status()); },        // FNSTSW AX
-        0x3D, 0x3E => { compare_flags(a, b); fpop(); },
+        0x3D, 0x3E => { set_cmp_flags(cmp_st(i)); fpop(); },
         _ => { fpu_unknown(); },
     }
 }

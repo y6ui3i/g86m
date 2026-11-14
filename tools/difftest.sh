@@ -55,7 +55,7 @@ done
 # Self-checking tests, for what the oracle cannot judge. A test passes when the console says OK and nothing else.
 for bin in build/s_*.bin; do
     name=$(basename "$bin" .bin)
-    case "$name" in s_686|s_fpu) cpu="--cpu i686" ;; *) cpu="" ;; esac
+    case "$name" in s_686|s_fpu|s_fpu80) cpu="--cpu i686" ;; *) cpu="" ;; esac
     for exe in build/g86m-debug build/g86m; do
         out=$("$exe" $cpu --max 2000000 "$bin" 2>/dev/null)
         if [ "$out" = "OK" ]; then
@@ -147,13 +147,15 @@ if [ -f images/vmlinuz-lts ] && [ -f images/initramfs-mini ]; then
     out=$(build/g86m --max 8000000000 --initrd images/initramfs-mini \
         --wait "~ # " --type "uname -m\n" --wait "~ # " \
         --type "printf '%f' 3; echo\n" --wait "~ # " \
+        --type "printf '%g %e' 0.1 12345.678; echo\n" --wait "~ # " \
         --type "awk 'BEGIN{print sqrt(2), atan2(1,1)*4, int(-3.7)}'\n" --wait "~ # " \
         --type "a=\$(cut -d. -f1 /proc/uptime); sleep 3; b=\$(cut -d. -f1 /proc/uptime); echo slept-\$((b-a))\n" --wait "~ # " \
         images/vmlinuz-lts 2>"build/linux.err" | tr -d '\r')
     status=$?
     if echo "$out" | grep -q "^i686$" && echo "$out" | grep -q "^3\.000000$" \
+        && echo "$out" | grep -q "^0\.1 1\.234568e+04$" \
         && echo "$out" | grep -q "^1\.41421 3\.14159 -3$" && echo "$out" | grep -Eq "^slept-[34]$"; then
-        echo "ok    linux shell (g86m): $(echo "$out" | grep -c '') lines; uname, printf %f, awk, sleep 3"
+        echo "ok    linux shell (g86m): $(echo "$out" | grep -c '') lines; uname, printf %f %g %e, awk, sleep 3"
     else
         fail=1
         echo "FAIL  linux shell (g86m): the session did not give the expected answers"

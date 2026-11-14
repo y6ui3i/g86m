@@ -967,3 +967,55 @@ met), floating-point exceptions (none is ever raised), the instruction and opera
 the saved environment (written as zero), FXSAVE and SSE, a disk, a network card, a clock chip.
 Whether FCOMI on real hardware clears OF, SF and AF was not checked; g86m leaves them, as
 rustx86 does.
+
+## E014: Arithmetic on the 80-bit format, so that printf rounds (M5d, 2026-11-14)
+
+- **Hypothesis**: The truncated floats of E013 come from one thing only: results of FPU
+  arithmetic are cut to the 53 mantissa bits of an f64. If add, subtract, multiply and divide are
+  done in integers on the 80-bit format (64 bits of mantissa, rounded as the control word says),
+  comparison looks at all 80 bits, and conversion to and from 64-bit integers is exact, then
+  `printf '%g %e' 0.1 12345.678` in the guest prints `0.1 1.234568e+04`.
+- **What changed since last time**: E013 computed every result as an f64. Now a result of the four
+  operations is an 80-bit value; f64 is used only where an operand is not an ordinary number (zero
+  times something, infinity, NaN, a denormal), where the result leaves the exponent range, for the
+  square root, and for the functions that go through libm. The trace tests set the precision
+  control to 53 bits, where rustx86's f64 arithmetic is the right answer, so they stay comparable.
+- **Next move for each result**:
+  - printf prints both numbers rounded → add them to the scripted Linux session, add a self-check
+    for 64-bit results (1/3, 1 + 2^-63, 2^64 + 1.5, a 64-bit integer through the stack), open a PR
+  - Still truncated → trace the escape opcodes of that printf (a `--trace-after` run filtered to
+    D8-DF) and find which instruction in musl's rounding test still loses bits; the candidates
+    are the comparison and the load of the `2/LDBL_EPSILON` constant
+  - Rounded, but another program's output changes for the worse → compare that sequence at 53-bit
+    precision against rustx86 to tell a new bug from a precision difference
+- **Cut-off**: The same day. If the integer arithmetic cannot be made to agree with rustx86 at
+  53-bit precision on the existing three trace tests, it does not go in.
+
+### Result
+
+2026-11-14. **The hypothesis held. printf rounds.**
+
+```
+~ # printf '%f %g %e %.17g\n' 3 0.1 12345.678 0.1
+3.000000 0.1 1.234568e+04 0.10000000000000001
+~ # awk 'BEGIN{print 1/3, sqrt(2), exp(1), atan2(1,1)*4, 2^0.5, int(-3.7), 1e300*1e10, 0.1+0.2}'
+0.333333 1.41421 2.71828 3.14159 1.41421 -3 inf 0.3
+```
+
+It worked on the first build that compiled; nothing had to be traced.
+
+At 53-bit precision the integer arithmetic agrees with rustx86 on all three trace tests (365
+lines), including the three directed rounding modes and 24-bit precision, which rustx86 gets from
+the residual and g86m now gets from the bits themselves. To make the comparison fair the tests
+set the precision control to 53 bits and no longer do arithmetic on the built-in constants.
+
+`tools/difftest.sh` has 45 checks, all passing. New: `s_fpu80`, a self-check for results that
+need 64 bits (1/3 to nearest, rounded down, and at 53 bits; (1/3) * 3 = 1; 1 + 2^-63; 2^64 + 1.5
+against 2^64 at both precisions; a 64-bit integer through the stack), and the two printf answers
+in the scripted Linux session. Boot time is unchanged (41.5 s to the shell).
+
+What still goes through f64, with 53 bits: the square root, the functions computed by libm
+(sine, cosine, tangent, arctangent, the logarithms, 2^x - 1), FPREM and FPREM1, the built-in
+constants (pi and the logarithms are loaded as f64 values, 11 bits short), a store to a 32-bit
+real (rounded twice: to f64, then to f32), and arithmetic on denormals or with a result outside
+the exponent range. No guest program was seen to depend on any of these.

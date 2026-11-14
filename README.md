@@ -10,9 +10,9 @@ its per-instruction trace is compared with g86m's.
 ## Status
 
 M5 is done: g86m boots a 32-bit Linux kernel (6.18) to a busybox shell on its serial console. For
-that the machine is an i686 with an x87 FPU; the FPU's registers hold 64-bit floats, not the 80
-bits of the real one, which is enough to boot and wrong in the last digit of `printf '%g' 0.1`
-(see E013 in the ledger).
+that the machine is an i686 with an x87 FPU. The FPU adds, subtracts, multiplies, divides and
+compares on the 80-bit format, in integers; the square root and the functions are computed as
+64-bit floats (E013 and E014 in the ledger say why the first matters and the second has not yet).
 
 M4: g86m is a 386 with protected mode, paging and virtual-8086 mode, and it passes
 [test386](https://github.com/barotto/test386.asm): the ROM reaches its final diagnostic code and
@@ -34,7 +34,7 @@ How the first day went is written up in a blog post (in Japanese):
 | M2 | The ELKS shell | done |
 | M3 | FreeDOS to the `A:\>` prompt | done (the installer was declined, not run) |
 | M4 | 386 protected mode and paging; pass test386 | done (no task switching) |
-| M5 | 32-bit Linux and busybox | done (an FPU of 64-bit floats; no disk, no network, no clock chip) |
+| M5 | 32-bit Linux and busybox | done (no disk, no network, no clock chip) |
 
 ## Technology choices
 
