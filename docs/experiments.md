@@ -1019,3 +1019,87 @@ What still goes through f64, with 53 bits: the square root, the functions comput
 constants (pi and the logarithms are loaded as f64 values, 11 bits short), a store to a 32-bit
 real (rounded twice: to f64, then to f32), and arithmetic on denormals or with a result outside
 the exponent range. No guest program was seen to depend on any of these.
+
+## E015: Where the Linux boot spends its time (2026-11-14)
+
+- **Hypothesis**: Under Linux the three one-entry translation caches of E010 miss far more often
+  than under test386, and each miss walks the two-level page table (two memory reads, four
+  checks, two possible writes). test386 runs in a handful of pages; a kernel alternates between
+  its code, its stack and data spread over many pages, and a one-entry cache keeps only the last.
+  If so, more than one translation per ten instructions is a miss, and a real TLB (a few hundred
+  entries, direct-mapped, separate for reads and writes) removes most of them.
+- **What changed since last time**: E010 measured bench.bin and test386. This measures the
+  workload that matters now: the boot to the busybox prompt (about 1.9 billion instructions,
+  41 s, about 46 MIPS, where test386 runs at 54). First with counters, not with a fix: misses per
+  instruction for code, reads and writes, and a host profile by function of the same run.
+- **Next move for each result**:
+  - Misses are above 0.1 per instruction → build the TLB; flush it where the one-entry caches are
+    flushed now; measure the boot again
+  - Misses are rare (below 0.02 per instruction) → the hypothesis is wrong; go by the host
+    profile: if a function other than `exec_one` holds more than 15%, look there; if it is flat,
+    count host instructions per guest instruction on the hottest guest loop, as E010 did
+  - The boot spends a large share of its instructions waiting (calibration loops, delay loops,
+    the idle loop not halting) → that is not interpreter speed; look at how virtual time advances
+    (the 64 instructions per timer tick) before touching the interpreter
+  - A fix gives less than 5% on the boot → take it out again unless it makes the code simpler
+- **Cut-off**: The same day. `tools/difftest.sh` stays at 45 of 45, and test386's output byte for
+  byte the reference, after every change that is kept. No decoded-instruction cache in this
+  round: that is a design change and gets its own card.
+
+### Result
+
+2026-11-14. **The hypothesis was wrong about the cost. The page-table walks were as frequent as
+predicted and nearly free; the time was in calls.** Release build, same machine, same day:
+
+| Benchmark | Before (main) | After | Change |
+|---|---:|---:|---:|
+| Linux boot to the shell prompt, 1,651,240,001 instructions | 43.3 s, 750 billion host instructions | 32.3 s, 584 billion | 25% less time |
+| test386 | 2284 ms, about 46 MIPS | 1511 ms, about 69 MIPS | 34% less time |
+| bench.bin (real mode) | 5919 ms, about 62 MIPS | 4449 ms, about 83 MIPS | 25% less time |
+
+The boot runs the same number of guest instructions before and after, to the last one: none of
+this changed what the guest sees. `tools/difftest.sh` is at 45 of 45 and test386's output is
+byte for byte the reference.
+
+What was measured, in order:
+
+| Step | Linux boot | Kept |
+|---|---:|---|
+| Baseline, with counters: 0.12 page-table walks per instruction | 44.3 s | |
+| A TLB: 256 entries each for reads and writes, for supervisor and user. Walks fell from 197 million to 4.9 million | 44.0 s | yes, see below |
+| 16- and 32-bit memory accesses and instruction operands taken at once, not byte by byte | 41.9 s | yes |
+| Globals reordered and padded so that the CPU state is aligned (tried eight paddings) | 1.5% fewer host instructions on a micro-benchmark | no |
+| The run loop works out the next event (timer, script, limit) and runs to it, instead of testing for each after every instruction | 39.4 s | yes |
+| `inline fn` on the small helpers of the instruction path | 32.0 s | yes, all but one |
+
+- **The TLB was what the card predicted would help, and at first it did nothing**: forty times
+  fewer walks, the same time. A walk is two memory reads and a few tests; 0.12 of them per
+  instruction is about ten host instructions out of 450. Measured again at the end, with the
+  other costs down, the TLB is worth 2.6% of the host instructions and about 4% of the time. It
+  stays: it is small, and it removes the flush of every cached translation at each change of
+  privilege level
+- **What broke it open was the same thing as in E010: counting.** `/usr/bin/time -l` said 447
+  host instructions per guest instruction for the boot. A loop of one instruction in 32-bit
+  protected mode (`probe/bench32.asm`) said about 230 of those are there for a NOP: the fixed
+  cost. Stepping one guest instruction in the debugger and listing what ran gave 227 host
+  instructions: 101 in `exec_one`, 56 in the run loop, 48 in `fetch8` for one byte, 22 in the
+  two register accessors
+- **The small helpers were not being inlined**, neither by Goose nor by clang, which stops once
+  the caller is as big as `exec_one`. Every `fetch8`, `regw`, `seg_read` was a call: registers
+  saved and restored, and after each call that can fault, a test of the fault flag. `inline fn`
+  on 57 helpers took the guest instruction above from 227 host instructions to 156 and the boot
+  from 678 to 554 billion
+- **Inlining everything costs build time.** With `decode_modrm` inlined too the binary is 859 KB
+  and a release build takes 15 s, against 199 KB and 1.4 s before. Leaving that one function as
+  a call gives 413 KB and 4.7 s, and the boot is within 2% (32.3 s against 32.0 s). That is
+  what was kept
+- **Alignment was a wrong guess.** Goose packs globals with no padding, so 32-bit fields sit at
+  odd addresses and arm64 needs a separate add to reach each one. Lining them up changed the
+  count by 1.5%: the add is there, but it is one instruction among hundreds
+
+What this leaves: a NOP still costs about 150 host instructions. What remains is spread thin:
+saving and restoring registers around `exec_one` (14), the checks for a pending fault, an
+interrupt and a BIOS entry (12), resetting the decode state (14), fetching the opcode byte
+(about 35), the prefix and LOCK tests (10), the dispatch (10), and the copy of the CPU state in
+the run loop (13). The next step that is not thin is the one this card excluded: not decoding
+the same instruction again every time it runs.

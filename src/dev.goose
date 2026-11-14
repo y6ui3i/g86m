@@ -122,7 +122,12 @@ var pit: Channel[3] = [Channel { reload: 0, mode: 3, access: 3, write_hi: false,
                        Channel { reload: 0, mode: 3, access: 3, write_hi: false, read_hi: false, latched: false, latch: 0, pending: 0 }];
 
 var timer_on = true;         // channel 0 is counting
-var timer_left = 262144;     // instructions until channel 0 next reaches zero
+var timer_at = 262144;       // the virtual time at which channel 0 next reaches zero
+
+// The run loop executes instructions without looking up until virtual time reaches a moment it
+// worked out beforehand. Whatever changes when the next event is due sets this, and the loop
+// looks up after the instruction that did it.
+var replan = false;
 
 fn pit_period() -> i64 {
     let n: i64 = if pit[0].reload == 0 { 65536 } else { pit[0].reload };
@@ -132,7 +137,7 @@ fn pit_period() -> i64 {
 // Channel 0 reached zero.
 fn timer_fire() {
     raise_irq(0);
-    timer_left = pit_period();
+    timer_at = vtime + pit_period();
     if pit[0].mode != 2 && pit[0].mode != 3 { timer_on = false; }     // one-shot modes stop
 }
 
@@ -152,7 +157,7 @@ fn ch2_out() -> bool {
 }
 
 fn pit_count(k: i64) -> u16 {
-    if k == 0 { return (timer_left / tick_insns) as! u16; }
+    if k == 0 { return ((timer_at - vtime) / tick_insns) as! u16; }
     if k == 2 {
         let n: i64 = if pit[2].reload == 0 { 65536 } else { pit[2].reload };
         let gone = ch2_elapsed();
@@ -178,7 +183,7 @@ fn pit_control(v: u8) {
     pit[k].write_hi = false;
     pit[k].read_hi = false;
     // A control word alone stops the count until a new value is written.
-    if k == 0 { timer_on = false; }
+    if k == 0 { timer_on = false; replan = true; }
 }
 
 fn pit_write(k: i64, v: u8) {
@@ -191,7 +196,7 @@ fn pit_write(k: i64, v: u8) {
     } else {
         pit[k].reload = v;
     }
-    if k == 0 { timer_on = true; timer_left = pit_period(); }
+    if k == 0 { timer_on = true; timer_at = vtime + pit_period(); replan = true; }
     if k == 2 { ch2_loaded_at = vtime; }
 }
 

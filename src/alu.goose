@@ -3,19 +3,19 @@
 
 import state;
 
-fn mask(w: u8) -> u32 {
+inline fn mask(w: u8) -> u32 {
     if w == 8 { return 0xFF; }
     if w == 16 { return 0xFFFF; }
     return 0xFFFFFFFF;
 }
 
-fn msb(w: u8) -> u32 {
+inline fn msb(w: u8) -> u32 {
     if w == 8 { return 0x80; }
     if w == 16 { return 0x8000; }
     return 0x80000000;
 }
 
-fn parity8(v: u32) -> bool {
+inline fn parity8(v: u32) -> bool {
     var x = v & 0xFF;
     x ^= x >> 4;
     x ^= x >> 2;
@@ -23,14 +23,14 @@ fn parity8(v: u32) -> bool {
     return x & 1 == 0;
 }
 
-fn set_szp(r: u32, w: u8) {
+inline fn set_szp(r: u32, w: u8) {
     set_flag(ZF, r & mask(w) == 0);
     set_flag(SF, r & msb(w) != 0);
     set_flag(PF, parity8(r));
 }
 
 // Sign-extends to i64, for multiply and divide.
-fn sx(v: u32, w: u8) -> i64 {
+inline fn sx(v: u32, w: u8) -> i64 {
     let wide: i64 = v & mask(w);
     let top: i64 = msb(w);
     if wide >= top { return wide - top - top; }
@@ -38,7 +38,7 @@ fn sx(v: u32, w: u8) -> i64 {
 }
 
 // op is the 3-bit field from the instruction: 0 ADD 1 OR 2 ADC 3 SBB 4 AND 5 SUB 6 XOR 7 CMP
-fn alu(op: u8, a: u32, b: u32, w: u8) -> u32 {
+inline fn alu(op: u8, a: u32, b: u32, w: u8) -> u32 {
     let m = mask(w);
     let s = msb(w);
     // The carry out of a 32-bit add does not fit in u32, so carries are worked out in u64.
@@ -74,14 +74,14 @@ fn alu(op: u8, a: u32, b: u32, w: u8) -> u32 {
 }
 
 // INC and DEC leave CF alone.
-fn inc(a: u32, w: u8) -> u32 {
+inline fn inc(a: u32, w: u8) -> u32 {
     let carry = flag(CF);
     let r = alu(0, a, 1, w);
     set_flag(CF, carry);
     return r;
 }
 
-fn dec(a: u32, w: u8) -> u32 {
+inline fn dec(a: u32, w: u8) -> u32 {
     let carry = flag(CF);
     let r = alu(5, a, 1, w);
     set_flag(CF, carry);

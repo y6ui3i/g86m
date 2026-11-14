@@ -33,14 +33,14 @@ var ea_off: u32 = 0;
 // ---- Fetch ----
 
 // The code segment decides the default operand and address size, and the width of EIP.
-fn code32() -> bool { return cpu.attr[CS] & A_BIG != 0; }
+inline fn code32() -> bool { return cpu.attr[CS] & A_BIG != 0; }
 
-fn fetch8() -> u8 {
+inline fn fetch8() -> u8 {
     if cpu.ip > cpu.limit[CS] { raise_gp(0); }
     let a = cpu.base[CS] + cpu.ip;
     // Translate once per page of code, not once per byte.
     if a >> 12 != code_page {
-        code_phys = translate(a, false, cpu.cpl == 3) & 0xFFFFF000;
+        code_phys = page_read(a);
         code_page = a >> 12;
     }
     let b = mem8(code_phys | a & 0xFFF);
@@ -49,37 +49,53 @@ fn fetch8() -> u8 {
     return b;
 }
 
-fn fetch16() -> u32 {
+// The wider fetches take their bytes at once when all of them lie in the page of code already
+// translated and inside the segment; otherwise byte by byte, which also finds the fault.
+inline fn fetch16() -> u32 {
+    let a = cpu.base[CS] + cpu.ip;
+    let lim = cpu.limit[CS];
+    if a >> 12 == code_page && a & 0xFFF <= 0xFFE && lim >= 1 && cpu.ip <= lim - 1 {
+        cpu.ip += 2;
+        if !code32() { cpu.ip &= 0xFFFF; }
+        return mem16(code_phys | a & 0xFFF);
+    }
     let lo: u32 = fetch8();
     let hi: u32 = fetch8();
     return lo | hi << 8;
 }
 
-fn fetch32() -> u32 {
+inline fn fetch32() -> u32 {
+    let a = cpu.base[CS] + cpu.ip;
+    let lim = cpu.limit[CS];
+    if a >> 12 == code_page && a & 0xFFF <= 0xFFC && lim >= 3 && cpu.ip <= lim - 3 {
+        cpu.ip += 4;
+        if !code32() { cpu.ip &= 0xFFFF; }
+        return mem32(code_phys | a & 0xFFF);
+    }
     let lo = fetch16();
     let hi = fetch16();
     return lo | hi << 16;
 }
 
 // An immediate or displacement of the operand size.
-fn fetchv() -> u32 {
+inline fn fetchv() -> u32 {
     if osz == 16 { return fetch16(); }
     return fetch32();
 }
 
-fn fetchw(w: u8) -> u32 {
+inline fn fetchw(w: u8) -> u32 {
     if w == 8 { return fetch8(); }
     if w == 16 { return fetch16(); }
     return fetch32();
 }
 
 // A byte, sign-extended to 32 bits.
-fn fetch_s8() -> u32 { return (fetch8() as! i8) as! u32; }
+inline fn fetch_s8() -> u32 { return (fetch8() as! i8) as! u32; }
 
 // ---- Operands ----
 
 // The default segment def, replaced by an override prefix when there is one.
-fn seg_of(def: i64) -> i64 {
+inline fn seg_of(def: i64) -> i64 {
     if seg_ovr >= 0 { return seg_ovr; }
     return def;
 }
@@ -130,19 +146,19 @@ fn decode_modrm() {
     ea_seg = seg_of(def);
 }
 
-fn rm_read(w: u8) -> u32 {
+inline fn rm_read(w: u8) -> u32 {
     if m_mod == 3 { return regw(m_rm, w); }
     return seg_read(ea_seg, ea_off, w);
 }
 
-fn rm_write(w: u8, v: u32) {
+inline fn rm_write(w: u8, v: u32) {
     if m_mod == 3 { set_regw(m_rm, w, v); } else { seg_write(ea_seg, ea_off, w, v); }
 }
 
 // The width of an instruction whose low opcode bit selects byte or word.
-fn width(op: u8) -> u8 { if op & 1 == 0 { return 8; } return osz; }
+inline fn width(op: u8) -> u8 { if op & 1 == 0 { return 8; } return osz; }
 
-fn cond(c: u8) -> bool {
+inline fn cond(c: u8) -> bool {
     let r = match c >> 1 {
         0 => flag(OF),
         1 => flag(CF),
@@ -159,13 +175,13 @@ fn cond(c: u8) -> bool {
 
 // ---- Stack and control transfer, at the operand size ----
 
-fn pushv(v: u32) { push_w(v, osz); }
-fn popv() -> u32 { return pop_w(osz); }
+inline fn pushv(v: u32) { push_w(v, osz); }
+inline fn popv() -> u32 { return pop_w(osz); }
 
 // A jump target is cut to 16 bits when the operand size is 16.
-fn set_ip(v: u32) { cpu.ip = if osz == 16 { v & 0xFFFF } else { v }; }
+inline fn set_ip(v: u32) { cpu.ip = if osz == 16 { v & 0xFFFF } else { v }; }
 
-fn jump_rel8(taken: bool) {
+inline fn jump_rel8(taken: bool) {
     let d = fetch_s8();
     if taken { set_ip(cpu.ip + d); }
 }
@@ -186,7 +202,7 @@ fn io_sensitive() {
 
 // ---- Registers used as addresses and counters: 16 or 32 bits by the address size ----
 
-fn addr_reg(i: u8) -> u32 { if asz32 { return r32(i); } return r16(i); }
+inline fn addr_reg(i: u8) -> u32 { if asz32 { return r32(i); } return r16(i); }
 
 fn addr_reg_add(i: u8, d: u32) {
     if asz32 { set_r32(i, r32(i) + d); } else { set_r16(i, r16(i) + (d as! u16)); }
@@ -1203,7 +1219,7 @@ fn step() {
     var err = fault_err;
     for attempt in 3 {
         cpu = saved;
-        flush_tlb();                     // the privilege level may have gone back with the rest
+        forget_last();                   // the privilege level may have gone back with the rest
         if log_faults { note_fault(vec, has_err, err); }
         if attempt == 2 { stop("triple fault; the last vector was", vec); return; }
         pending = true;
